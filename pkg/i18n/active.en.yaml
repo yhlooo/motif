@@ -1,0 +1,5 @@
+commands.CmdLongDesc: This is an example go application.
+commands.CmdShortDesc: Example Go application.
+commands.GlobalOptsVerbosityDesc: Number for the log level verbosity (0, 1, or 2)
+commands.VersionDesc: Print the version information
+commands.VersionOptsOutputFormatDesc: Output format. One of (json, yaml)

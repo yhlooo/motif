@@ -1,0 +1,15 @@
+commands.CmdLongDesc:
+    hash: sha1-d21a0f54050d258983479be2a33357cb598a3498
+    other: 这是一个示例 Go 应用
+commands.CmdShortDesc:
+    hash: sha1-1de581449c44dea0e2494bc949c4214659ab4942
+    other: 示例 Go 应用
+commands.GlobalOptsVerbosityDesc:
+    hash: sha1-d99c2b79a5d6e3a42f969d5df2dd282899e7e5fd
+    other: 日志级别 (0, 1 或 2)
+commands.VersionDesc:
+    hash: sha1-79526ef3b57592a549aa6b35ce7596080ebf5668
+    other: 打印版本信息
+commands.VersionOptsOutputFormatDesc:
+    hash: sha1-43a90ee888e64bc5efd1f81974af5fafee8ab9a6
+    other: 输出格式 (json, yaml)
