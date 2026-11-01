@@ -14,6 +14,18 @@
 - command handler 支持 timeout 和 async 配置；快照应使用同步 handler，不能采用异步快照作为前置边界。正式 init 参数、超时、输出与最低支持版本仍需发行版验证。
 - config 源码明确将 ghost_snapshot 标注为兼容旧配置，已不再生成快照。不能依赖这个旧机制提供每次编辑前后快照；本轮资料未建立可替代 Motif 快照的稳定公开查询接口。
 
+## Stop hook：同一轮内强制完成分批
+
+补充核实仍基于上述固定源码；原始 schema、执行实现、turn loop 及测试摘录见 [来源清单](../reference/codex/20261101/SOURCES.md)。本机 CLI 报告 `codex-cli 0.163.0`，但本轮未发起真实模型会话，未运行官方测试；以下是源码和现有测试的审读结论，不是发行版端到端验证。
+
+- Stop 输入包含 session_id、turn_id、model、cwd、stop_hook_active 和 last_assistant_message。可以明确标识待结束的轮次。
+- 同步 hook 退出码为 0 并向 stdout 写 `{"decision":"block","reason":"继续完成分批的指令及列表"}`，会阻止正常结束并把 reason 注入续做上下文。不是 `continue:false`；后者表示停止处理，语义相反。
+- 实现也支持退出码 2 + stderr 的继续提示。Motif 建议使用成功退出的结构化 block 输出，区分正常分批门禁与程序故障。
+- session/turn.rs 在 should_block 时记录 hook prompt，设置 stop_hook_active=true 并继续同一 turn 循环。官方测试 `stop_hook_can_block_multiple_times_in_same_turn` 覆盖连续两次 block、第三次放行，断言三次 turn_id 相同，stop_hook_active 为 false/true/true。
+- 不应因为 stop_hook_active=true 就无条件跳过检查；应以是否仍有待分批 AI patch 决定是否继续 block。同步 hook 才可施加控制效果，异步不能实现该门禁。hook 必须实际启用并具备信任/执行权限。
+- 用户中断、进程退出、模型调用失败或 hook 故障不在正常 Stop 门禁保证内。不能宣称外部强制结束时也一定完成分批。
+- shell 环境源码提供 CODEX_THREAD_ID / CODEX_TOOL_CALL_ID 等身份。`--current-turn` 不应臆造 CODEX_TURN_ID：可在 PreToolUse 保存调用→turn 映射，命令通过当前调用身份解析本轮；无法唯一定位则明确报错，不取全仓库“最近一轮”。
+
 ## Git
 
 依据：[Git 2.52.0 官方 githooks 文档](../reference/git/2.52.0/githooks.adoc)。
