@@ -10,11 +10,11 @@ var (
 
 	MsgRootDesc = &i18n.Message{
 		ID:    "commands.CmdShortDesc",
-		Other: "Example Go application.",
+		Other: "Intent-based code review for AI coding agents.",
 	}
 	MsgRootLongDesc = &i18n.Message{
 		ID:    "commands.CmdLongDesc",
-		Other: `This is an example go application.`,
+		Other: `Capture actual code changes, organize intent batches, and review them locally.`,
 	}
 
 	MsgVersionDesc = &i18n.Message{

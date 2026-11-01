@@ -1,9 +1,9 @@
 commands.CmdLongDesc:
-    hash: sha1-d21a0f54050d258983479be2a33357cb598a3498
-    other: 这是一个示例 Go 应用
+    hash: sha1-347e2cd2ecd2d645f6b42b2fd183c44d818c297e
+    other: 记录实际代码变化，整理意图批次，并在本地审查。
 commands.CmdShortDesc:
-    hash: sha1-1de581449c44dea0e2494bc949c4214659ab4942
-    other: 示例 Go 应用
+    hash: sha1-302862c3c093a765d68cd934a414aab70e0497b5
+    other: 面向 AI 编程助手的意图驱动代码审查工具。
 commands.GlobalOptsVerbosityDesc:
     hash: sha1-d99c2b79a5d6e3a42f969d5df2dd282899e7e5fd
     other: 日志级别 (0, 1 或 2)

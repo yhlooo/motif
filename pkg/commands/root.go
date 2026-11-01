@@ -83,7 +83,7 @@ func NewCommand(name string) *cobra.Command {
 			ctx := cmd.Context()
 
 			if err := globalOpts.Validate(); err != nil {
-				return err
+				return &UsageError{err}
 			}
 			ctx = ContextWithGlobalOptions(ctx, globalOpts)
 
@@ -109,8 +109,7 @@ func NewCommand(name string) *cobra.Command {
 		},
 
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("Hello World!")
-			return nil
+			return cmd.Help()
 		},
 
 		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
@@ -123,7 +122,10 @@ func NewCommand(name string) *cobra.Command {
 
 	cmd.AddCommand(
 		newVersionCommand(),
+		newHookCommand(), newPatchCommand(), newBatchCommand(),
+		newInstallCommand(), newUninstallCommand(), newWebCommand(),
 	)
 
+	wrapUsage(cmd)
 	return cmd
 }
