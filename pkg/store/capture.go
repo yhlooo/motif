@@ -49,160 +49,178 @@ func appendEvent(tx *gorm.DB, w, segment, base, kind, turnID, callID, pair strin
 
 // Observe atomically publishes a prepared immutable state and advances the cursor.
 func (s *Store) Observe(ctx context.Context, o Observation) error {
-	return s.update(ctx, func(tx *gorm.DB) error {
-		w := o.Worktree.ID
-		for _, state := range []State{o.State, o.BaseState, o.CommitState} {
-			if err := s.validateState(state); err != nil {
-				return err
-			}
-		}
-		if o.Receipt != "" {
-			var receipt receiptRecord
-			err := tx.Where("worktree_id = ? AND key = ?", w, o.Receipt).Take(&receipt).Error
-			if err == nil {
-				if receipt.Digest != o.Digest {
-					return fmt.Errorf("hook receipt conflict")
-				}
-				return nil
-			}
-			if !errors.Is(err, gorm.ErrRecordNotFound) {
-				return err
-			}
-		}
-		c, err := cursor(tx, w)
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	return s.sourceUpdate(ctx, func(tx *gorm.DB) error { return s.observeTx(tx, o) })
+}
+func (s *Store) observeTx(tx *gorm.DB, o Observation) error {
+	w := o.Worktree.ID
+	for _, state := range []State{o.State, o.BaseState, o.CommitState} {
+		if err := s.validateState(state); err != nil {
 			return err
 		}
-		if c.Version != o.ExpectedVersion {
-			return fmt.Errorf("capture cursor changed; retry observation")
-		}
-		if o.Trigger == "PostToolUse" {
-			if c.ActiveCall == "" {
-				return nil
+	}
+	if o.Receipt != "" {
+		var receipt receiptRecord
+		err := tx.Where("worktree_id = ? AND key = ?", w, o.Receipt).Take(&receipt).Error
+		if err == nil {
+			if receipt.Digest != o.Digest {
+				return fmt.Errorf("hook receipt conflict")
 			}
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+	}
+	c, err := cursor(tx, w)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	if c.Version != o.ExpectedVersion {
+		return fmt.Errorf("capture cursor changed; retry observation")
+	}
+	if o.Trigger == "PostToolUse" {
+		if c.ActiveCall == "" {
+			return nil
+		}
+		a, e := call(tx, c.ActiveCall)
+		if e != nil {
+			return e
+		}
+		if a.Session != o.Session || a.ExternalID != o.ExternalCall {
+			return nil
+		}
+	}
+	turnID, err := turn(tx, w, o.Session, o.Turn)
+	if err != nil {
+		return err
+	}
+	reset := c.SnapshotID == "" || o.Reset
+	if reset {
+		keep := false
+		if c.ActiveCall != "" && o.KeepCall {
 			a, e := call(tx, c.ActiveCall)
 			if e != nil {
 				return e
 			}
-			if a.Session != o.Session || a.ExternalID != o.ExternalCall {
-				return nil
-			}
+			keep = a.Session == o.CallerSession && a.ExternalID == o.CallerID
 		}
-		turnID, err := turn(tx, w, o.Session, o.Turn)
-		if err != nil {
-			return err
-		}
-		reset := c.SnapshotID == "" || o.Reset
-		if reset {
-			if c.ActiveCall != "" {
-				if err = tx.Model(&callRecord{}).Where("id = ?", c.ActiveCall).Update("status", "incomplete").Error; err != nil {
-					return err
-				}
-			}
-			baseline, e := saveSnapshot(tx, w, o.Base, "baseline", o.BaseState)
-			if e != nil {
-				return e
-			}
-			c.SnapshotID = baseline.ID
-			c.Base = o.Base
-			c.ActiveCall = ""
-			c.Segment = ID()
-		}
-		before, err := snapshot(tx, c.SnapshotID)
-		if err != nil {
-			return err
-		}
-		if err = s.validateState(before.State); err != nil {
-			return err
-		}
-		active := c.ActiveCall
-		kind := "unknown"
-		eventTurn := turnID
-		eventCall := ""
-		if active != "" {
-			a, e := call(tx, active)
-			if e != nil {
-				return e
-			}
-			matched := o.Trigger == "PostToolUse" || (o.Commit != "" && a.Session == o.CallerSession && a.ExternalID == o.CallerID)
-			if matched {
-				kind = "tool_edit"
-				eventTurn = a.TurnID
-				eventCall = active
-			} else {
-				if e = tx.Model(&callRecord{}).Where("id = ?", active).Update("status", "incomplete").Error; e != nil {
-					return e
-				}
-				c.ActiveCall = ""
-			}
-		}
-		after, err := saveSnapshot(tx, w, c.Base, o.Trigger, o.State)
-		if err != nil {
-			return err
-		}
-		if err = appendEvent(tx, w, c.Segment, c.Base, kind, eventTurn, eventCall, "", before, after); err != nil {
-			return err
-		}
-		c.SnapshotID = after.ID
-		switch o.Trigger {
-		case "PreToolUse":
-			if o.Call == nil || turnID == "" || o.ExternalCall == "" {
-				return fmt.Errorf("tool call identity is required")
-			}
-			a := *o.Call
-			a.ID = ID()
-			a.TurnID = turnID
-			a.Session = o.Session
-			a.ExternalID = o.ExternalCall
-			a.Status = "open"
-			row := callRow(a)
-			err = tx.Create(&row).Error
-			if err != nil {
+		if c.ActiveCall != "" && !keep {
+			if err = tx.Model(&callRecord{}).Where("id = ?", c.ActiveCall).Update("status", "incomplete").Error; err != nil {
 				return err
 			}
-			c.ActiveCall = a.ID
-		case "PostToolUse":
-			if err = tx.Model(&callRecord{}).Where("id = ?", active).Update("status", "finished").Error; err != nil {
-				return err
-			}
+		}
+		baseline, e := s.saveSnapshot(tx, w, o.Base, "baseline", o.BaseState)
+		if e != nil {
+			return e
+		}
+		c.SnapshotID = baseline.ID
+		c.Base = o.Base
+		if !keep {
 			c.ActiveCall = ""
 		}
-		if o.Commit != "" {
-			tree, e := saveSnapshot(tx, w, o.Commit, "commit", o.CommitState)
-			if e != nil {
-				return e
-			}
-			pair := ""
-			if !Equal(after.State, tree.State) {
-				pair = ID()
-				if e = appendEvent(tx, w, c.Segment, c.Base, "virtual_close", "", "", pair, after, tree); e != nil {
-					return e
-				}
-			}
-			if e = tx.Model(&eventRecord{}).Where("worktree_id = ? AND segment = ? AND final_commit = ?", w, c.Segment, "").Update("final_commit", o.Commit).Error; e != nil {
-				return e
-			}
-			c.Base = o.Commit
-			c.Segment = ID()
-			if pair != "" {
-				if e = appendEvent(tx, w, c.Segment, c.Base, "virtual_carry", "", "", pair, tree, after); e != nil {
-					return e
-				}
-			}
-		}
-		c.Version++
-		row := cursorRecord{WorktreeID: w, SnapshotID: c.SnapshotID, Base: c.Base, ActiveCall: c.ActiveCall, Segment: c.Segment, Version: c.Version}
-		if err = tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "worktree_id"}}, DoUpdates: clause.AssignmentColumns([]string{"snapshot_id", "base", "active_call", "segment", "version"})}).Create(&row).Error; err != nil {
-			return err
-		}
-		if err = autoUnknown(tx, w); err != nil {
-			return err
-		}
-		if o.Receipt != "" {
-			err = tx.Create(&receiptRecord{WorktreeID: w, Key: o.Receipt, Digest: o.Digest}).Error
-		}
+		c.Segment = ID()
+	}
+	before, err := s.snapshot(tx, c.SnapshotID)
+	if err != nil {
 		return err
-	})
+	}
+	if err = s.validateState(before.State); err != nil {
+		return err
+	}
+	active := c.ActiveCall
+	kind := "unknown"
+	eventTurn := turnID
+	eventCall := ""
+	if active != "" {
+		a, e := call(tx, active)
+		if e != nil {
+			return e
+		}
+		matched := o.Trigger == "PostToolUse" || ((o.Commit != "" || o.Trigger == "rewrite_observation") && a.Session == o.CallerSession && a.ExternalID == o.CallerID)
+		if o.KeepCall && a.Session == o.CallerSession && a.ExternalID == o.CallerID && (o.Trigger == "rewrite_resume" || o.Trigger == "post-checkout") {
+			// A Git state transition is not an AI edit; keep only the proven live call.
+		} else if matched {
+			kind = "tool_edit"
+			eventTurn = a.TurnID
+			eventCall = active
+		} else {
+			if e = tx.Model(&callRecord{}).Where("id = ?", active).Update("status", "incomplete").Error; e != nil {
+				return e
+			}
+			c.ActiveCall = ""
+		}
+	}
+	after, err := s.saveSnapshot(tx, w, c.Base, o.Trigger, o.State)
+	if err != nil {
+		return err
+	}
+	if o.ResumePair != "" {
+		kind = "virtual_carry"
+		eventTurn = ""
+		eventCall = ""
+	}
+	if err = appendEvent(tx, w, c.Segment, c.Base, kind, eventTurn, eventCall, o.ResumePair, before, after); err != nil {
+		return err
+	}
+	c.SnapshotID = after.ID
+	switch o.Trigger {
+	case "PreToolUse":
+		if o.Call == nil || turnID == "" || o.ExternalCall == "" {
+			return fmt.Errorf("tool call identity is required")
+		}
+		a := *o.Call
+		a.ID = ID()
+		a.TurnID = turnID
+		a.Session = o.Session
+		a.ExternalID = o.ExternalCall
+		a.Status = "open"
+		row := callRow(a)
+		err = tx.Create(&row).Error
+		if err != nil {
+			return err
+		}
+		c.ActiveCall = a.ID
+	case "PostToolUse":
+		if err = tx.Model(&callRecord{}).Where("id = ?", active).Update("status", "finished").Error; err != nil {
+			return err
+		}
+		c.ActiveCall = ""
+	}
+	if o.Commit != "" {
+		tree, e := s.saveSnapshot(tx, w, o.Commit, "commit", o.CommitState)
+		if e != nil {
+			return e
+		}
+		pair := ""
+		if !Equal(after.State, tree.State) {
+			pair = ID()
+			if e = appendEvent(tx, w, c.Segment, c.Base, "virtual_close", "", "", pair, after, tree); e != nil {
+				return e
+			}
+		}
+		if e = tx.Model(&eventRecord{}).Where("worktree_id = ? AND segment = ? AND final_commit = ?", w, c.Segment, "").Update("final_commit", o.Commit).Error; e != nil {
+			return e
+		}
+		c.Base = o.Commit
+		c.Segment = ID()
+		if pair != "" {
+			if e = appendEvent(tx, w, c.Segment, c.Base, "virtual_carry", "", "", pair, tree, after); e != nil {
+				return e
+			}
+		}
+	}
+	c.Version++
+	row := cursorRecord{WorktreeID: w, SnapshotID: c.SnapshotID, Base: c.Base, ActiveCall: c.ActiveCall, Segment: c.Segment, Version: c.Version}
+	if err = tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "worktree_id"}}, DoUpdates: clause.AssignmentColumns([]string{"snapshot_id", "base", "active_call", "segment", "version"})}).Create(&row).Error; err != nil {
+		return err
+	}
+	if err = autoUnknown(tx, w); err != nil {
+		return err
+	}
+	if o.Receipt != "" {
+		err = tx.Create(&receiptRecord{WorktreeID: w, Key: o.Receipt, Digest: o.Digest}).Error
+	}
+	return err
 }
 
 func (s *Store) ResolveTurn(w, session, external string) (string, error) {

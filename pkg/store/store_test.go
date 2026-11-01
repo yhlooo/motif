@@ -4,6 +4,8 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -87,7 +89,7 @@ func TestLegacyV1DatabaseCompatibility(t *testing.T) {
 	}
 	frozen, err := s.Review(ids.Repository, ids.Review)
 	if err != nil || frozen.Items[0].Title != "legacy title" {
-		t.Fatal("source deletion changed frozen legacy review", err)
+		t.Fatal("source deletion changed persisted legacy view", err)
 	}
 	if err = s.Reply(ctx, ids.Repository, ids.Thread, "new ORM reply", "Reviewer"); err != nil {
 		t.Fatal(err)
@@ -191,5 +193,152 @@ func TestConcurrentObservationsRejectStaleCursor(t *testing.T) {
 	events, err := a.Events(w.ID)
 	if err != nil || len(events) != 1 {
 		t.Fatal("observation duplicated or lost", err)
+	}
+}
+
+func TestSparseSnapshotsKeepOnlyOverridesAndRequireBase(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w, err := s.Register(ctx, "/repo.git", "/repo", "/repo.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("from Git\n")
+	hash := s.RegisterGitBlob(content, "git-object", func() ([]byte, error) { return content, nil })
+	base := State{"same.txt": {Mode: "100644", Hash: hash}, "deleted.txt": {Mode: "100644", Hash: hash}}
+	s.SetBaseReader("/repo.git", func(context.Context, string) (State, error) { return Clone(base), nil })
+	if err = s.Observe(ctx, Observation{Worktree: w, Base: "base", BaseState: base, State: base, Trigger: "Stop"}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.Cursor(w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err = s.db.Model(&snapshotEntryRecord{}).Where("snapshot_id = ?", c.SnapshotID).Count(&count).Error; err != nil || count != 0 {
+		t.Fatal("unchanged paths were duplicated", count, err)
+	}
+	changedHash, err := s.PutBlob([]byte("changed\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := State{"same.txt": {Mode: "100755", Hash: hash}, "new.txt": {Mode: "100644", Hash: changedHash}}
+	if err = s.Observe(ctx, Observation{Worktree: w, Base: "base", BaseState: base, State: state, Trigger: "Stop", ExpectedVersion: c.Version}); err != nil {
+		t.Fatal(err)
+	}
+	c, err = s.Cursor(w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sn, err := s.Snapshot(c.SnapshotID)
+	if err != nil || !Equal(sn.State, state) {
+		t.Fatal("sparse state not restored", err)
+	}
+	var entries []snapshotEntryRecord
+	if err = s.db.Where("snapshot_id = ?", c.SnapshotID).Find(&entries).Error; err != nil || len(entries) != 3 {
+		t.Fatal("mode/add/delete overrides lost", err)
+	}
+	deleted := false
+	for _, entry := range entries {
+		deleted = deleted || entry.Deleted && string(entry.Path) == "deleted.txt"
+	}
+	if !deleted {
+		t.Fatal("delete confused with empty content")
+	}
+	path, _ := s.blobPath(hash)
+	if _, err = os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("unchanged Git content was duplicated on disk", err)
+	}
+	s.SetBaseReader("/repo.git", func(context.Context, string) (State, error) { return nil, fmt.Errorf("missing Git object") })
+	if _, err = s.Snapshot(c.SnapshotID); err == nil {
+		t.Fatal("missing baseline was silently reconstructed")
+	}
+}
+
+func TestReviewPublishRejectsChangedSourceRevision(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	w, err := s.Register(ctx, "/repo.git", "/repo", "/repo.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, revision, err := s.ReviewInputs(ctx, w.RepositoryID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Observe(ctx, Observation{Worktree: w, Base: "base", BaseState: State{}, State: State{}, Trigger: "Stop"}); err != nil {
+		t.Fatal(err)
+	}
+	r := Review{ID: ID(), RepositoryID: w.RepositoryID, Title: "stale", Source: "feature", Target: "main", CheckSource: true, SourceRevision: revision}
+	if err = s.SaveReview(ctx, w, &r); !errors.Is(err, ErrStaleView) {
+		t.Fatal("mixed source revision was published", err)
+	}
+	list, err := s.Reviews(w.RepositoryID)
+	if err != nil || len(list) != 0 {
+		t.Fatal("failed publish left partial review", err)
+	}
+}
+
+func TestLegacyReviewRefreshOnlyAdoptsProvableIdentity(t *testing.T) {
+	for _, kind := range []string{"integrity_unknown", "batch"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			s, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			w, err := s.Register(ctx, "/legacy.git", "/legacy", "/legacy.git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			hash, err := s.PutBlob([]byte("legacy content\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			itemID := ID()
+			r := Review{ID: ID(), RepositoryID: w.RepositoryID, Title: "legacy", Base: "base", Head: "head", Items: []ReviewItem{{ID: itemID, Kind: kind, Title: "same title", Before: State{}, After: State{"file": {Mode: "100644", Hash: hash}}}}}
+			if err = s.SaveReview(ctx, w, &r); err != nil {
+				t.Fatal(err)
+			}
+			if err = s.Decision(ctx, w.RepositoryID, r.ID, itemID, "approved"); err != nil {
+				t.Fatal(err)
+			}
+			r.Items[0].ID = ID()
+			r.Items[0].StableKey = "head/" + kind + "/source"
+			r.Items[0].Commit = "head"
+			r.ViewDigest = "new view"
+			if kind == "batch" {
+				r.Items[0].SourceBatch = "new batch identity"
+			}
+			if err = s.PublishReview(ctx, w, &r, 1); err != nil {
+				t.Fatal(err)
+			}
+			current, err := s.Review(w.RepositoryID, r.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "integrity_unknown" {
+				if current.Items[0].ID != itemID || current.Status != "approved" || current.Items[0].StableKey == "" {
+					t.Fatal("provable identity lost", current)
+				}
+			} else {
+				if current.Items[0].ID == itemID || current.Items[0].Decision != "pending" {
+					t.Fatal("unproven batch inherited approval", current)
+				}
+				var historical reviewItemRecord
+				if err = s.db.Where("id = ?", itemID).Take(&historical).Error; err != nil || historical.Active || historical.Decision != "approved" {
+					t.Fatal("old approval was not preserved", historical, err)
+				}
+			}
+		})
 	}
 }

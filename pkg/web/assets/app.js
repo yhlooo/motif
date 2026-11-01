@@ -10,7 +10,7 @@ async function api(path, method = 'GET', body) {
   $('#error').hidden = true;
   const response = await fetch('/api/' + path, { method, headers: { 'Content-Type': 'application/json', 'X-Motif-Token': token }, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await response.json().catch(() => ({ error: '服务返回了无效响应' }));
-  if (!response.ok) throw new Error(data.error || '请求失败'); return data;
+  if (!response.ok) { if(response.status === 409) data.error = '审查内容已更新，请刷新后重试。'; throw new Error(data.error || '请求失败'); } return data;
 }
 function badge(state) { return el('span', 'badge ' + state, labels[state] || state); }
 function button(text, fn, cls) { const b = el('button', cls, text); b.type = 'button'; b.onclick = safe(fn); return b; }
@@ -32,6 +32,7 @@ async function openReview(id) {
 function renderReview() {
   app.replaceChildren(); const top = el('section', 'review-top'), row = el('div', 'row');
   const back = el('a', '', '← 全部审查'); back.href = '/'; row.append(back, badge(current.status));
+  row.append(button('刷新审查', () => openReview(current.id), 'secondary'));
   top.append(row, el('h1', '', current.title), el('div', 'muted', `${current.source} → ${current.target} · ${current.commits.length} 个提交 · ${date(current.created)}`), el('p', '', current.warning));
   const workspace = el('div', 'workspace'), sidebar = el('aside', 'sidebar'), content = el('section', 'content'); content.id = 'content';
   sidebar.append(el('p', '', '按意图审查 · Shift 点击连续选择'));
@@ -42,8 +43,9 @@ function renderReview() {
   }); workspace.append(sidebar, content); app.append(top, workspace);
 }
 async function renderSelection() {
+  if (!current.items.length) { $('#content').replaceChildren(el('div','empty','当前源/目标分支之间没有待审阅修改。')); return; }
   const request = ++generation, reviewId = current.id, firstId = current.items[first].id, lastId = current.items[last].id;
-  const [diffs, threads] = await Promise.all([api(`code-reviews/${reviewId}/diff?first=${encodeURIComponent(firstId)}&last=${encodeURIComponent(lastId)}`), api(`code-reviews/${reviewId}/threads`)]);
+  const [diffs, threads] = await Promise.all([api(`code-reviews/${reviewId}/diff?first=${encodeURIComponent(firstId)}&last=${encodeURIComponent(lastId)}&view_version=${current.view_version}`), api(`code-reviews/${reviewId}/threads?first=${encodeURIComponent(firstId)}&last=${encodeURIComponent(lastId)}&view_version=${current.view_version}`)]);
   if (request !== generation || current.id !== reviewId) return; threadList = threads;
   const root = $('#content'); root.replaceChildren();
   root.append(el('span', 'eyebrow', first === last ? 'INTENT BATCH' : 'COMBINED DIFF'), el('h2', '', first === last ? current.items[first].title : `合并审查第 ${first + 1}–${last + 1} 项`));
@@ -52,7 +54,7 @@ async function renderSelection() {
   for (const [decision, label, cls] of [['approved', '批准所选', ''], ['rejected', '要求修改', 'reject'], ['pending', '重置为待审查', 'secondary']]) {
     actions.append(button(label, async () => {
       const ids = current.items.slice(first, last + 1).map(i => i.id), id = current.id;
-      for (const item of ids) await api(`code-reviews/${id}/items/${item}/decision`, 'PATCH', { decision });
+      for (const item of ids) await api(`code-reviews/${id}/items/${item}/decision`, 'PATCH', { decision, view_version: current.view_version });
       current = await api('code-reviews/' + id); renderReview(); await renderSelection();
     }, cls));
   } root.append(actions);
@@ -92,15 +94,15 @@ function showComposer(firstId, lastId) {
   const text = el('textarea'); text.setAttribute('aria-label', '行评论'); box.append(text);
   box.append(button('发表行评论', async () => {
     if (!text.value.trim()) throw new Error('请输入评论内容');
-    await api(`code-reviews/${current.id}/threads`, 'POST', { first: firstId, last: lastId, path: selection.path, side: selection.side, start: selection.start, end: selection.end, body: text.value }); selectedLine = null; await renderSelection();
+    await api(`code-reviews/${current.id}/threads`, 'POST', { first: firstId, last: lastId, path: selection.path, side: selection.side, start: selection.start, end: selection.end, body: text.value,view_version:current.view_version }); selectedLine = null; await renderSelection();
   }), button('取消', () => { root.replaceChildren(); selectedLine = null; }, 'secondary')); root.append(box); text.focus();
 }
 function renderThreads(firstId, lastId) {
   const root = el('section', 'threads'); root.append(el('h2', '', '当前视图评论'));
-  const matching = threadList.filter(t => t.first === firstId && t.last === lastId);
+  const matching = threadList;
   if (!matching.length) root.append(el('p', 'muted', '暂无评论。批准和评论均保存在本机，不会执行 Git 合并。'));
   matching.forEach(thread => {
-    const box = el('article', 'thread'); box.append(el('div', 'muted', `${thread.side === 'old' ? '旧' : '新'}侧第 ${thread.start}–${thread.end} 行 · 内容 ${thread.hash.slice(0, 12)}`));
+    const box = el('article', 'thread'); box.append(el('div', 'muted', `${thread.side === 'old' ? '旧' : '新'}侧第 ${(thread.mapped_ranges || [{start:thread.start,end:thread.end}]).map(r => `${r.start}–${r.end}`).join('、')} 行 · 内容 ${thread.hash.slice(0, 12)}`));
     thread.comments.forEach(c => { box.append(el('div', 'muted', `${c.author} · ${date(c.created)}`), el('p', '', c.body)); });
     const text = el('textarea'); text.placeholder = '回复这条评论…'; text.setAttribute('aria-label', '回复评论');
     box.append(text, button('回复', async () => { if (!text.value.trim()) throw new Error('请输入回复内容'); await api(`comment-threads/${thread.id}/replies`, 'POST', { body: text.value }); await renderSelection(); })); root.append(box);
@@ -120,5 +122,5 @@ safe(async () => {
   for (const field of ['source', 'target']) data.branches.forEach(branch => { const option = el('option', '', branch); option.value = branch; $('#create-form').elements[field].append(option); });
   const fields = $('#create-form').elements; fields.target.value = data.branches.includes('main') ? 'main' : data.branches.includes('master') ? 'master' : data.branches[0] || '';
   fields.source.value = data.branches.find(b => b !== fields.target.value) || fields.target.value;
-  const match = /^#review=([a-zA-Z0-9]+)$/.exec(location.hash); if (match) await openReview(match[1]); else await listReviews();
+  const match = /^#review=([a-zA-Z0-9-]+)$/.exec(location.hash); if (match) await openReview(match[1]); else await listReviews();
 })();

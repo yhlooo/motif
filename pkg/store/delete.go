@@ -36,18 +36,21 @@ func (s *Store) DeletionPlan(rid string) (DeletionPlan, error) {
 	batches := s.db.Model(&batchRecord{}).Select("id").Where("worktree_id IN (?)", wids)
 	threads := s.db.Model(&threadRecord{}).Select("id").Where("review_id IN (?)", reviews)
 	queries := map[string]*gorm.DB{
-		"worktrees":        s.db.Model(&worktreeRecord{}).Where("repository_id = ?", rid),
-		"turns":            s.db.Model(&turnRecord{}).Where("worktree_id IN (?)", wids),
-		"snapshots":        s.db.Model(&snapshotRecord{}).Where("worktree_id IN (?)", wids),
-		"snapshot_entries": s.db.Model(&snapshotEntryRecord{}).Where("snapshot_id IN (?)", snapshotIDs(s.db, rid)),
-		"events":           s.db.Model(&eventRecord{}).Where("worktree_id IN (?)", wids),
-		"batches":          s.db.Model(&batchRecord{}).Where("worktree_id IN (?)", wids),
-		"batch_members":    s.db.Model(&batchMemberRecord{}).Where("batch_id IN (?)", batches),
-		"tool_calls":       s.db.Model(&callRecord{}).Where("turn_id IN (?)", turns),
-		"hook_receipts":    s.db.Model(&receiptRecord{}).Where("worktree_id IN (?)", wids),
-		"reviews":          s.db.Model(&reviewRecord{}).Where("repository_id = ?", rid),
-		"comment_threads":  s.db.Model(&threadRecord{}).Where("review_id IN (?)", reviews),
-		"comments":         s.db.Model(&commentRecord{}).Where("thread_id IN (?)", threads),
+		"commit_rewrites":       s.db.Model(&rewriteRecord{}).Where("repository_id = ?", rid),
+		"commit_projections":    s.db.Model(&projectionRecord{}).Where("repository_id = ?", rid),
+		"reference_transitions": s.db.Model(&referenceRecord{}).Where("repository_id = ?", rid),
+		"worktrees":             s.db.Model(&worktreeRecord{}).Where("repository_id = ?", rid),
+		"turns":                 s.db.Model(&turnRecord{}).Where("worktree_id IN (?)", wids),
+		"snapshots":             s.db.Model(&snapshotRecord{}).Where("worktree_id IN (?)", wids),
+		"snapshot_entries":      s.db.Model(&snapshotEntryRecord{}).Where("snapshot_id IN (?)", snapshotIDs(s.db, rid)),
+		"events":                s.db.Model(&eventRecord{}).Where("worktree_id IN (?)", wids),
+		"batches":               s.db.Model(&batchRecord{}).Where("worktree_id IN (?)", wids),
+		"batch_members":         s.db.Model(&batchMemberRecord{}).Where("batch_id IN (?)", batches),
+		"tool_calls":            s.db.Model(&callRecord{}).Where("turn_id IN (?)", turns),
+		"hook_receipts":         s.db.Model(&receiptRecord{}).Where("worktree_id IN (?)", wids),
+		"reviews":               s.db.Model(&reviewRecord{}).Where("repository_id = ?", rid),
+		"comment_threads":       s.db.Model(&threadRecord{}).Where("review_id IN (?)", reviews),
+		"comments":              s.db.Model(&commentRecord{}).Where("thread_id IN (?)", threads),
 	}
 	for name, q := range queries {
 		var n int64

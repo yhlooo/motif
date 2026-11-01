@@ -55,3 +55,11 @@ rebase 拆分提交、冲突解决、部分重放的最终 tree 均可计算并�
 - [Stop 结果解析](https://github.com/openai/codex/blob/67f0994b532b8740f14b5b738af7b7b2a915b1d6/codex-rs/hooks/src/events/stop.rs)、[同步控制判断](https://github.com/openai/codex/blob/67f0994b532b8740f14b5b738af7b7b2a915b1d6/codex-rs/hooks/src/engine/mod.rs#L206)、[command runner](https://github.com/openai/codex/blob/67f0994b532b8740f14b5b738af7b7b2a915b1d6/codex-rs/hooks/src/engine/command_runner.rs)
 - [同轮继续执行](https://github.com/openai/codex/blob/67f0994b532b8740f14b5b738af7b7b2a915b1d6/codex-rs/core/src/session/turn.rs#L745)、[重复阻止结束测试](https://github.com/openai/codex/blob/67f0994b532b8740f14b5b738af7b7b2a915b1d6/codex-rs/core/tests/suite/hooks.rs#L1303)
 - [shell 调用身份](https://github.com/openai/codex/blob/67f0994b532b8740f14b5b738af7b7b2a915b1d6/codex-rs/core/src/exec_env.rs)、[旧 ghost_snapshot 兼容配置](https://github.com/openai/codex/blob/67f0994b532b8740f14b5b738af7b7b2a915b1d6/codex-rs/core/src/config/mod.rs#L237)
+
+## 补充：实际 CLI 有效配置诊断
+
+2026-11-01 核实本机 `codex-cli 0.163.0`：运行只读 `codex --no-daemon app-server --listen stdio://`，以 JSON-RPC initialize（experimentalApi）、initialized、hooks/list（cwds 为当前项目）查询。实现只读取有效 hook 的 event、command、来源、同步/启用/信任元数据，不调用 hook、不启动模型、不变更或绕过信任。协议来自本机 CLI 的帮助及生成协议检查，生成文件仅用于临时调查，不纳入 reference。
+
+在独立 CODEX_HOME 下安装 Motif 配置：项目未信任时 hooks/list 不返回项目 hook；仅在隔离配置中信任项目后，hook enabled=true 但 trust=untrusted，说明项目配置可加载和命令可执行信任是不同条件。`motif doctor` 只有自身命令及来源匹配、同步、启用且受信任才报告生效；不可用的 CLI/接口明确返回无法诊断，不把安装成功等同生效。自动化测试模拟有效/未信任/命令被修改等返回值。
+
+这项查询没有验证真实模型编辑/Stop 续轮链路；该限制继续保留。真实 Git 安装脚本另在临时仓库验证了 post-commit、post-checkout、reference-transaction、amend/rebase 的 post-rewrite 输入与派生批次，不以模拟通知代替该检查。

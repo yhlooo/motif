@@ -104,7 +104,7 @@ func (s *Store) CreateBatch(ctx context.Context, w, title, description string, i
 	if strings.TrimSpace(title) == "" || strings.TrimSpace(description) == "" || len(ids) == 0 {
 		return b, invalid("batch requires title, description and patch IDs")
 	}
-	err = s.update(ctx, func(tx *gorm.DB) error {
+	err = s.sourceUpdate(ctx, func(tx *gorm.DB) error {
 		es, e := events(tx, w)
 		if e != nil {
 			return e
@@ -164,12 +164,12 @@ func (s *Store) CreateBatch(ctx context.Context, w, title, description string, i
 			}
 			b.Members = append(b.Members, event.ID)
 		}
-		return nil
+		return mirrorBatch(tx, w, b, selected)
 	})
 	return
 }
 func (s *Store) DeleteBatch(ctx context.Context, w, id string) error {
-	return s.update(ctx, func(tx *gorm.DB) error {
+	return s.sourceUpdate(ctx, func(tx *gorm.DB) error {
 		return tx.Where("id = ? AND worktree_id = ?", id, w).Delete(&batchRecord{}).Error
 	})
 }
@@ -216,6 +216,69 @@ func autoUnknown(tx *gorm.DB, w string) error {
 		}
 		for k := i; k < j; k++ {
 			if err = tx.Create(&batchMemberRecord{BatchID: id, EventID: es[k].ID, Position: k - i}).Error; err != nil {
+				return err
+			}
+		}
+		i = j
+	}
+	return nil
+}
+
+func mirrorBatch(tx *gorm.DB, w string, b Batch, source []Event) error {
+	seeds := []string{}
+	for _, e := range source {
+		seeds = append(seeds, e.ID)
+	}
+	derived := []eventRecord{}
+	seen := map[string]bool{}
+	for len(seeds) > 0 {
+		var rows []eventRecord
+		if err := tx.Where("projected = ? AND origin_id IN ?", true, seeds).Order("sequence").Find(&rows).Error; err != nil {
+			return err
+		}
+		seeds = nil
+		for _, row := range rows {
+			if seen[row.ID] {
+				continue
+			}
+			seen[row.ID] = true
+			derived = append(derived, row)
+			seeds = append(seeds, row.ID)
+		}
+	}
+	sort.Slice(derived, func(i, j int) bool {
+		if derived[i].FinalCommit != derived[j].FinalCommit {
+			return derived[i].FinalCommit < derived[j].FinalCommit
+		}
+		return derived[i].Sequence < derived[j].Sequence
+	})
+	for i := 0; i < len(derived); {
+		var used int64
+		if err := tx.Model(&batchMemberRecord{}).Where("event_id = ?", derived[i].ID).Count(&used).Error; err != nil {
+			return err
+		}
+		if used > 0 {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(derived) && derived[j].FinalCommit == derived[i].FinalCommit && derived[j].Sequence == derived[j-1].Sequence+1 {
+			var n int64
+			if err := tx.Model(&batchMemberRecord{}).Where("event_id = ?", derived[j].ID).Count(&n).Error; err != nil {
+				return err
+			}
+			if n > 0 {
+				break
+			}
+			j++
+		}
+		id := ProjectionBatchID(derived[i].FinalCommit, b.ID+"/"+derived[i].ID)
+		record := batchRecord{ID: id, WorktreeID: derived[i].WorktreeID, Kind: b.Kind, Title: b.Title, Description: b.Description, OriginBatch: b.ID}
+		if err := tx.Create(&record).Error; err != nil {
+			return err
+		}
+		for k := i; k < j; k++ {
+			if err := tx.Create(&batchMemberRecord{BatchID: id, EventID: derived[k].ID, Position: k - i}).Error; err != nil {
 				return err
 			}
 		}

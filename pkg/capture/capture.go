@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -46,10 +47,7 @@ func Observe(ctx context.Context, r *gitrepo.Repository, w store.Worktree, o sto
 			return e
 		}
 		fields := strings.Fields(string(raw))
-		if len(fields) > 2 {
-			return fmt.Errorf("merge commit capture is not supported")
-		}
-		if len(fields) == 2 {
+		if len(fields) >= 2 {
 			o.Parent = fields[1]
 		}
 		if c.SnapshotID != "" && c.Base == head {
@@ -58,7 +56,7 @@ func Observe(ctx context.Context, r *gitrepo.Repository, w store.Worktree, o sto
 		if c.SnapshotID == "" {
 			o.Base = o.Parent
 		} else if c.Base != o.Parent {
-			return fmt.Errorf("commit parent differs from capture baseline; history rewrite requires a new observation")
+			return nil // amend/rebase association is handled by post-rewrite.
 		} else {
 			o.Base = c.Base
 		}
@@ -151,7 +149,7 @@ func Codex(ctx context.Context, s *store.Store, raw []byte) (map[string]string, 
 	}
 	var pending []store.Event
 	for _, e := range es {
-		if e.TurnID == turn && e.Kind == "tool_edit" && e.BatchID == "" {
+		if !e.Projected && e.TurnID == turn && e.Kind == "tool_edit" && e.BatchID == "" {
 			pending = append(pending, e)
 		}
 	}
@@ -183,6 +181,9 @@ func PatchList(events []store.Event, turn string) string {
 	return b.String()
 }
 func Git(ctx context.Context, s *store.Store, dir, event string) error {
+	return GitNotification(ctx, s, dir, event, nil, strings.NewReader(""))
+}
+func GitNotification(ctx context.Context, s *store.Store, dir, event string, args []string, input io.Reader) error {
 	r, err := gitrepo.Open(ctx, dir, s)
 	if err != nil {
 		return err
@@ -191,15 +192,22 @@ func Git(ctx context.Context, s *store.Store, dir, event string) error {
 	if err != nil {
 		return err
 	}
-	o := store.Observation{Trigger: event}
+	o := store.Observation{Trigger: event, CallerSession: os.Getenv("CODEX_THREAD_ID"), CallerID: os.Getenv("CODEX_TOOL_CALL_ID")}
 	switch event {
 	case "post-commit":
 		o.Commit = "HEAD"
-		o.CallerSession = os.Getenv("CODEX_THREAD_ID")
-		o.CallerID = os.Getenv("CODEX_TOOL_CALL_ID")
 	case "post-checkout":
-		// Observe resets only when HEAD actually changed. A path checkout or
-		// a same-HEAD branch switch must retain the current event segment.
+		o.KeepCall = true
+	case "post-rewrite":
+		if len(args) != 1 {
+			return fmt.Errorf("post-rewrite requires amend or rebase")
+		}
+		return Rewrite(ctx, r, w, args[0], input)
+	case "reference-transaction":
+		if len(args) != 1 {
+			return fmt.Errorf("reference-transaction requires phase")
+		}
+		return References(ctx, r, w, args[0], input)
 	default:
 		return fmt.Errorf("unsupported Git observation: %s", event)
 	}

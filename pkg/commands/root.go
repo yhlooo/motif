@@ -123,7 +123,7 @@ func NewCommand(name string) *cobra.Command {
 	cmd.AddCommand(
 		newVersionCommand(),
 		newHookCommand(), newPatchCommand(), newBatchCommand(),
-		newInstallCommand(), newUninstallCommand(), newWebCommand(),
+		newInstallCommand(), newUninstallCommand(), newWebCommand(), newDoctorCommand(),
 	)
 
 	wrapUsage(cmd)

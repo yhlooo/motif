@@ -3,7 +3,8 @@ package store
 // Persistence models keep database keys/constraints independent of API views.
 // Table and column names retain the original v1 schema for existing databases.
 type schemaMigration struct {
-	Version int `gorm:"primaryKey;autoIncrement:false"`
+	Generation int64 `gorm:"not null;default:0"`
+	Version    int   `gorm:"primaryKey;autoIncrement:false"`
 }
 
 func (schemaMigration) TableName() string { return "schema_migrations" }
@@ -55,6 +56,7 @@ func callRow(c Call) callRecord {
 }
 
 type snapshotRecord struct {
+	Sparse        bool            `gorm:"not null;default:false"`
 	ID            string          `gorm:"primaryKey"`
 	WorktreeID    string          `gorm:"not null;index"`
 	Base, Trigger string          `gorm:"not null"`
@@ -65,6 +67,7 @@ type snapshotRecord struct {
 func (snapshotRecord) TableName() string { return "snapshots" }
 
 type snapshotEntryRecord struct {
+	Deleted    bool            `gorm:"not null;default:false"`
 	SnapshotID string          `gorm:"primaryKey"`
 	Path       []byte          `gorm:"type:blob;primaryKey"`
 	Mode       string          `gorm:"not null"`
@@ -87,6 +90,8 @@ type cursorRecord struct {
 func (cursorRecord) TableName() string { return "worktree_cursors" }
 
 type eventRecord struct {
+	OriginID                                  string          `gorm:"not null;default:''"`
+	Projected                                 bool            `gorm:"not null;default:false"`
 	ID                                        string          `gorm:"primaryKey"`
 	WorktreeID                                string          `gorm:"not null;uniqueIndex:event_sequence,priority:1"`
 	Sequence                                  int64           `gorm:"not null;uniqueIndex:event_sequence,priority:2"`
@@ -101,10 +106,11 @@ type eventRecord struct {
 
 func (eventRecord) TableName() string { return "edit_events" }
 func (r eventRecord) value() Event {
-	return Event{ID: r.ID, WorktreeID: r.WorktreeID, Sequence: r.Sequence, Kind: r.Kind, Segment: r.Segment, Base: r.Base, Commit: r.FinalCommit, TurnID: r.TurnID, CallID: r.CallID, BeforeID: r.BeforeID, AfterID: r.AfterID, PairID: r.PairID, From: r.IntervalStart, Until: r.IntervalEnd}
+	return Event{OriginID: r.OriginID, Projected: r.Projected, ID: r.ID, WorktreeID: r.WorktreeID, Sequence: r.Sequence, Kind: r.Kind, Segment: r.Segment, Base: r.Base, Commit: r.FinalCommit, TurnID: r.TurnID, CallID: r.CallID, BeforeID: r.BeforeID, AfterID: r.AfterID, PairID: r.PairID, From: r.IntervalStart, Until: r.IntervalEnd}
 }
 
 type batchRecord struct {
+	OriginBatch              string          `gorm:"not null;default:''"`
 	ID                       string          `gorm:"primaryKey"`
 	WorktreeID               string          `gorm:"not null;index"`
 	Kind, Title, Description string          `gorm:"not null"`
@@ -133,6 +139,9 @@ type receiptRecord struct {
 func (receiptRecord) TableName() string { return "hook_receipts" }
 
 type reviewRecord struct {
+	SourceRevision                    int64             `gorm:"not null;default:0"`
+	ViewDigest                        string            `gorm:"not null;default:''"`
+	Version                           int64             `gorm:"not null;default:1"`
 	ID                                string            `gorm:"primaryKey"`
 	RepositoryID                      string            `gorm:"not null;index"`
 	Title, Source, Target, Base, Head string            `gorm:"not null"`
@@ -145,7 +154,7 @@ type reviewRecord struct {
 
 func (reviewRecord) TableName() string { return "code_reviews" }
 func (r reviewRecord) value() Review {
-	return Review{ID: r.ID, RepositoryID: r.RepositoryID, Title: r.Title, Source: r.Source, Target: r.Target, SourceOID: r.SourceOID, TargetOID: r.TargetOID, Base: r.Base, Head: r.Head, Created: r.Created, Integrity: r.Integrity, Warning: r.Warning}
+	return Review{ViewDigest: r.ViewDigest, Version: r.Version, ID: r.ID, RepositoryID: r.RepositoryID, Title: r.Title, Source: r.Source, Target: r.Target, SourceOID: r.SourceOID, TargetOID: r.TargetOID, Base: r.Base, Head: r.Head, Created: r.Created, Integrity: r.Integrity, Warning: r.Warning}
 }
 
 type reviewCommitRecord struct {
@@ -158,6 +167,11 @@ type reviewCommitRecord struct {
 func (reviewCommitRecord) TableName() string { return "code_review_commits" }
 
 type reviewItemRecord struct {
+	StableKey                string          `gorm:"not null;default:''"`
+	Commit                   string          `gorm:"not null;default:''"`
+	SourceBatch              string          `gorm:"not null;default:''"`
+	Digest                   string          `gorm:"not null;default:''"`
+	Active                   bool            `gorm:"not null;default:true"`
 	ID                       string          `gorm:"primaryKey"`
 	ReviewID                 string          `gorm:"not null;uniqueIndex:review_position,priority:1"`
 	Position                 int             `gorm:"not null;uniqueIndex:review_position,priority:2"`
@@ -182,6 +196,9 @@ type reviewEventRecord struct {
 func (reviewEventRecord) TableName() string { return "code_review_item_events" }
 
 type threadRecord struct {
+	AnchorItem                    string            `gorm:"not null;default:''"`
+	BeforeID                      string            `gorm:"not null;default:''"`
+	AfterID                       string            `gorm:"not null;default:''"`
 	ID                            string            `gorm:"primaryKey"`
 	ReviewID, FirstItem, LastItem string            `gorm:"not null"`
 	Path                          []byte            `gorm:"type:blob;not null"`
@@ -205,5 +222,40 @@ type commentRecord struct {
 
 func (commentRecord) TableName() string { return "comments" }
 func models() []any {
-	return []any{&schemaMigration{}, &repositoryRecord{}, &worktreeRecord{}, &turnRecord{}, &callRecord{}, &snapshotRecord{}, &snapshotEntryRecord{}, &cursorRecord{}, &eventRecord{}, &batchRecord{}, &batchMemberRecord{}, &receiptRecord{}, &reviewRecord{}, &reviewCommitRecord{}, &reviewItemRecord{}, &reviewEventRecord{}, &threadRecord{}, &commentRecord{}}
+	return []any{&schemaMigration{}, &repositoryRecord{}, &worktreeRecord{}, &turnRecord{}, &callRecord{}, &snapshotRecord{}, &snapshotEntryRecord{}, &cursorRecord{}, &eventRecord{}, &batchRecord{}, &batchMemberRecord{}, &receiptRecord{}, &reviewRecord{}, &reviewCommitRecord{}, &reviewItemRecord{}, &reviewEventRecord{}, &threadRecord{}, &commentRecord{}, &rewriteRecord{}, &projectionRecord{}, &referenceRecord{}}
 }
+
+// Projections identify derived events without changing any original observation.
+type rewriteRecord struct {
+	ID           string            `gorm:"primaryKey"`
+	RepositoryID string            `gorm:"not null;uniqueIndex:rewrite_identity,priority:1"`
+	Kind         string            `gorm:"not null"`
+	Old          string            `gorm:"not null;uniqueIndex:rewrite_identity,priority:2"`
+	New          string            `gorm:"not null;uniqueIndex:rewrite_identity,priority:3"`
+	Position     int               `gorm:"not null"`
+	Repository   *repositoryRecord `gorm:"foreignKey:RepositoryID;constraint:OnDelete:CASCADE"`
+}
+
+func (rewriteRecord) TableName() string { return "commit_rewrites" }
+
+type projectionRecord struct {
+	ID           string            `gorm:"primaryKey"`
+	RepositoryID string            `gorm:"not null;uniqueIndex:commit_projection,priority:1"`
+	Commit       string            `gorm:"column:commit_oid;not null;uniqueIndex:commit_projection,priority:2"`
+	Parent       string            `gorm:"not null"`
+	Warning      string            `gorm:"not null"`
+	Repository   *repositoryRecord `gorm:"foreignKey:RepositoryID;constraint:OnDelete:CASCADE"`
+}
+
+func (projectionRecord) TableName() string { return "commit_projections" }
+
+type referenceRecord struct {
+	ID           string            `gorm:"primaryKey"`
+	RepositoryID string            `gorm:"not null;index"`
+	Old, New     string            `gorm:"not null"`
+	Ref          []byte            `gorm:"not null;type:blob"`
+	ObservedAt   int64             `gorm:"not null"`
+	Repository   *repositoryRecord `gorm:"foreignKey:RepositoryID;constraint:OnDelete:CASCADE"`
+}
+
+func (referenceRecord) TableName() string { return "reference_transitions" }

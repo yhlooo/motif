@@ -4,10 +4,12 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,8 +28,10 @@ type File struct {
 	Shared  bool   `json:"shared,omitempty"`
 }
 type Manifest struct {
-	Config File   `json:"config"`
-	Hooks  []File `json:"hooks"`
+	OwnerFile     string `json:"owner_file,omitempty"`
+	ConfigCreated bool   `json:"config_created,omitempty"`
+	Config        File   `json:"config"`
+	Hooks         []File `json:"hooks"`
 }
 
 func manifestPath(r *gitrepo.Repository) string { return filepath.Join(r.GitDir, "motif-install.json") }
@@ -92,9 +96,15 @@ func Install(ctx context.Context, r *gitrepo.Repository, binary string) (Manifes
 		if err = Verify(m); err != nil {
 			return m, false, err
 		}
-		return m, false, nil
+		complete := map[string]bool{}
+		for _, hook := range m.Hooks {
+			complete[filepath.Base(hook.Path)] = true
+		}
+		if complete["post-commit"] && complete["post-checkout"] && complete["post-rewrite"] && complete["reference-transaction"] {
+			return m, false, nil
+		}
 	}
-	if !errors.Is(err, os.ErrNotExist) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return m, false, err
 	}
 	// Shared hooksPath must not cause project installation to edit another project or global hooks.
@@ -103,12 +113,6 @@ func Install(ctx context.Context, r *gitrepo.Repository, binary string) (Manifes
 		hooks = filepath.Join(r.CommonDir, "hooks")
 	} else if !filepath.IsAbs(hooks) {
 		hooks = filepath.Join(r.Root, hooks)
-	}
-	if !within(r.Root, hooks) && !within(r.CommonDir, hooks) {
-		return m, false, fmt.Errorf("core.hooksPath is outside this project; shared global hook directories need manual integration: %s", hooks)
-	}
-	if resolved, e := filepath.EvalSymlinks(hooks); e == nil && !within(r.Root, resolved) && !within(r.CommonDir, resolved) {
-		return m, false, fmt.Errorf("hook directory resolves outside this project")
 	}
 	config := filepath.Join(r.Root, ".codex", "config.toml")
 	if info, e := os.Lstat(config); e == nil && !info.Mode().IsRegular() {
@@ -126,15 +130,21 @@ func Install(ctx context.Context, r *gitrepo.Repository, binary string) (Manifes
 	if err != nil {
 		return m, false, err
 	}
-	if existing != nil {
+	if existing != nil && string(existing) != m.Config.Content {
 		return m, false, fmt.Errorf("unmanaged Motif block already exists; inspect %s", config)
 	}
-	m.Config = File{Path: config, Content: configBlock(binary)}
-	next := append(append([]byte{}, raw...), []byte("\n"+m.Config.Content)...)
+	next := append([]byte{}, raw...)
+	if existing == nil {
+		_, statErr := os.Stat(config)
+		m.ConfigCreated = os.IsNotExist(statErr)
+		m.Config = File{Path: config, Content: configBlock(binary)}
+		next = append(next, []byte("\n"+m.Config.Content)...)
+	}
+	m.Hooks = nil
 	if err = validateTOML(next); err != nil {
 		return m, false, fmt.Errorf("cannot merge Codex hooks: %w", err)
 	}
-	for _, name := range []string{"post-commit", "post-checkout"} {
+	for _, name := range []string{"post-commit", "post-checkout", "post-rewrite", "reference-transaction"} {
 		path := filepath.Join(hooks, name)
 		_, err := os.Lstat(path)
 		backup := ""
@@ -144,8 +154,8 @@ func Install(ctx context.Context, r *gitrepo.Repository, binary string) (Manifes
 			if e != nil {
 				return m, false, e
 			}
-			if !info.Mode().IsRegular() {
-				return m, false, fmt.Errorf("refuse to replace non-regular hook %s", path)
+			if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+				return m, false, fmt.Errorf("refuse to replace non-file hook %s", path)
 			}
 			data, e := os.ReadFile(path)
 			if e != nil {
@@ -154,7 +164,7 @@ func Install(ctx context.Context, r *gitrepo.Repository, binary string) (Manifes
 			shared = bytes.HasPrefix(data, []byte("#!/bin/sh\n# Managed by Motif;"))
 			backup = path + ".motif-original"
 			if shared {
-				if _, e = os.Stat(backup); os.IsNotExist(e) {
+				if _, e = os.Lstat(backup); os.IsNotExist(e) {
 					backup = ""
 				} else if e != nil {
 					return m, false, e
@@ -170,11 +180,11 @@ func Install(ctx context.Context, r *gitrepo.Repository, binary string) (Manifes
 		} else if !os.IsNotExist(err) {
 			return m, false, err
 		}
-		content := "#!/bin/sh\n# Managed by Motif; see motif-install.json\nstatus=0\n"
-		if backup != "" {
-			content += "if [ -x " + quote(backup) + " ]; then\n  " + quote(backup) + " \"$@\" || status=$?\nfi\n"
+		content := hookScript(binary, name, backup)
+		if !within(r.Root, hooks) && !within(r.CommonDir, hooks) {
+			content = strings.Replace(content, " hook git ", " hook git --installed-only ", 1)
 		}
-		content += quote(binary) + " hook git " + name + " \"$@\" || true\nexit \"$status\"\n"
+
 		if shared {
 			data, e := os.ReadFile(path)
 			if e != nil {
@@ -248,6 +258,16 @@ func Install(ctx context.Context, r *gitrepo.Repository, binary string) (Manifes
 			return m, false, err
 		}
 	}
+	m.OwnerFile = filepath.Join(hooks, ".motif-projects", fmt.Sprintf("%x.json", sha256.Sum256([]byte(r.GitDir))))
+	ownerData, e := json.Marshal(map[string]string{"git_dir": r.GitDir})
+	if e != nil {
+		rollback()
+		return m, false, e
+	}
+	if err = write(m.OwnerFile, ownerData, 0600); err != nil {
+		rollback()
+		return m, false, err
+	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err == nil {
 		err = write(manifestPath(r), data, 0600)
@@ -274,6 +294,15 @@ func Verify(m Manifest) error {
 		return fmt.Errorf("Motif config was changed: %s", m.Config.Path)
 	}
 	for _, h := range m.Hooks {
+		if h.Backup != "" {
+			info, e := os.Lstat(h.Backup)
+			if e != nil {
+				return fmt.Errorf("original hook backup is unavailable: %w", e)
+			}
+			if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+				return fmt.Errorf("original hook backup was changed: %s", h.Backup)
+			}
+		}
 		data, e := os.ReadFile(h.Path)
 		if e != nil {
 			return e
@@ -311,7 +340,12 @@ func Uninstall(r *gitrepo.Repository, m Manifest) error {
 	if err != nil {
 		return err
 	}
-	if err = atomic(m.Config.Path, next, info.Mode().Perm()); err != nil {
+	if m.ConfigCreated && strings.TrimSpace(string(next)) == "" {
+		if err = os.Remove(m.Config.Path); err != nil {
+			return err
+		}
+		_ = os.Remove(filepath.Dir(m.Config.Path))
+	} else if err = atomic(m.Config.Path, next, info.Mode().Perm()); err != nil {
 		return err
 	}
 	for _, h := range m.Hooks {
@@ -327,6 +361,12 @@ func Uninstall(r *gitrepo.Repository, m Manifest) error {
 			}
 		}
 	}
+	if m.OwnerFile != "" {
+		if err = os.Remove(m.OwnerFile); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		_ = os.Remove(filepath.Dir(m.OwnerFile))
+	}
 	return os.Remove(manifestPath(r))
 }
 
@@ -336,6 +376,49 @@ func within(parent, path string) bool {
 }
 func otherOwners(r *gitrepo.Repository, m Manifest) (map[string]bool, error) {
 	keep := map[string]bool{}
+	if len(m.Hooks) > 0 {
+		directory := filepath.Join(filepath.Dir(m.Hooks[0].Path), ".motif-projects")
+		entries, e := os.ReadDir(directory)
+		if e != nil && !os.IsNotExist(e) {
+			return nil, e
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			data, e := os.ReadFile(filepath.Join(directory, entry.Name()))
+			if e != nil {
+				return nil, e
+			}
+			var owner struct {
+				GitDir string `json:"git_dir"`
+			}
+			if e = json.Unmarshal(data, &owner); e != nil {
+				return nil, e
+			}
+			if owner.GitDir == r.GitDir {
+				continue
+			}
+			data, e = os.ReadFile(filepath.Join(owner.GitDir, "motif-install.json"))
+			if os.IsNotExist(e) {
+				continue
+			}
+			if e != nil {
+				return nil, e
+			}
+			var other Manifest
+			if e = json.Unmarshal(data, &other); e != nil {
+				return nil, e
+			}
+			for _, h := range other.Hooks {
+				for _, ours := range m.Hooks {
+					if h.Path == ours.Path {
+						keep[h.Path] = true
+					}
+				}
+			}
+		}
+	}
 	raw, err := r.Git(context.Background(), "worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		return nil, err
@@ -368,4 +451,49 @@ func otherOwners(r *gitrepo.Repository, m Manifest) (map[string]bool, error) {
 		}
 	}
 	return keep, nil
+}
+
+func hookScript(binary, name, backup string) string {
+	content := "#!/bin/sh\n# Managed by Motif; see motif-install.json\nstatus=0\n"
+	input := ""
+	if name == "post-rewrite" || name == "reference-transaction" {
+		content += "input=$(mktemp) || {\n"
+		if backup != "" {
+			content += "  if [ -x " + quote(backup) + " ]; then " + quote(backup) + " \"$@\"; exit $?; fi\n"
+		}
+		content += "  exit 0\n}\ntrap 'rm -f \"$input\"' EXIT HUP INT TERM\ncat >\"$input\" || exit 0\n"
+		input = " <\"$input\""
+	}
+	if backup != "" {
+		content += "if [ -x " + quote(backup) + " ]; then\n  " + quote(backup) + " \"$@\"" + input + " || status=$?\nfi\n"
+	}
+	content += quote(binary) + " hook git " + name + " \"$@\"" + input + " || true\nexit \"$status\"\n"
+	return content
+}
+
+// HasGitHook limits a shared hooksPath wrapper to projects that installed it.
+func HasGitHook(ctx context.Context, dir, event string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--absolute-git-dir")
+	cmd.Dir = dir
+	raw, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	data, err := os.ReadFile(filepath.Join(strings.TrimSpace(string(raw)), "motif-install.json"))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var m Manifest
+	if err = json.Unmarshal(data, &m); err != nil {
+		return false, err
+	}
+	for _, hook := range m.Hooks {
+		if filepath.Base(hook.Path) == event {
+			return true, nil
+		}
+	}
+	return false, nil
 }

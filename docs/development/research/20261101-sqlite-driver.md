@@ -4,15 +4,15 @@
 
 按用户明确要求，使用 `github.com/glebarez/sqlite v1.11.0` 配合 `gorm.io/gorm v1.31.1`。底层是 `github.com/glebarez/go-sqlite` 和 modernc 的纯 Go SQLite，不依赖 CGO 或 Wasm。原先使用的 ncruces Go/Wasm 驱动及 wazero 已从运行依赖中移除。
 
-官方依据（均为固定版本原文存档）：
+官方依据（[固定版本索引](../reference/sqlite-gorm-sources.md)，仅保留文档与外部源码链接）：
 
 - [glebarez/sqlite README](../reference/glebarez-sqlite/v1.11.0/README.md)，来源 https://github.com/glebarez/sqlite/blob/v1.11.0/README.md 。明确说明 pure-Go、GORM 用法，以及外键默认关闭、应使用 `_pragma=foreign_keys(1)`。
-- [GORM dialector 源码](../reference/glebarez-sqlite/v1.11.0/sqlite.go.txt)，来源 https://github.com/glebarez/sqlite/blob/v1.11.0/sqlite.go 。注册的是 glebarez 的 `sqlite` 驱动。
-- [底层连接源码](../reference/glebarez-go-sqlite/v1.21.2/sqlite.go.txt)，来源 https://github.com/glebarez/go-sqlite/blob/v1.21.2/sqlite.go 。支持 `_pragma` 和 `_txlock=immediate`；后者用于在读取采集游标前取得写事务锁。
-- [GORM CRUD 与 Transaction 源码](../reference/gorm/v1.31.1/finisher_api.go.txt)，来源 https://github.com/go-gorm/gorm/blob/v1.31.1/finisher_api.go 。
-- [GORM Migrator 接口](../reference/gorm/v1.31.1/migrator.go.txt)，来源 https://github.com/go-gorm/gorm/blob/v1.31.1/migrator.go 。
+- [GORM dialector 源码](https://github.com/glebarez/sqlite/blob/v1.11.0/sqlite.go)，来源 https://github.com/glebarez/sqlite/blob/v1.11.0/sqlite.go 。注册的是 glebarez 的 `sqlite` 驱动。
+- [底层连接源码](https://github.com/glebarez/go-sqlite/blob/v1.21.2/sqlite.go)，来源 https://github.com/glebarez/go-sqlite/blob/v1.21.2/sqlite.go 。支持 `_pragma` 和 `_txlock=immediate`；后者用于在读取采集游标前取得写事务锁。
+- [GORM CRUD 与 Transaction 源码](https://github.com/go-gorm/gorm/blob/v1.31.1/finisher_api.go)，来源 https://github.com/go-gorm/gorm/blob/v1.31.1/finisher_api.go 。
+- [GORM Migrator 接口](https://github.com/go-gorm/gorm/blob/v1.31.1/migrator.go)，来源 https://github.com/go-gorm/gorm/blob/v1.31.1/migrator.go 。
 
-新库通过 GORM AutoMigrate 建立模型、外键、唯一约束和检查约束；现有 v1 库表结构保持兼容，不重写既有数据。所有业务查询、插入、更新、删除和事务均使用 GORM API。连接池句柄仅用于连接数配置和 Close，不执行 SQL。
+新库通过 GORM AutoMigrate 建立模型、外键、唯一约束和检查约束；现有 v1 库增量迁移至 v6，不重写既有事件与评论；旧快照格式保持兼容。所有业务查询、插入、更新、删除和事务均使用 GORM API。连接池句柄仅用于连接数配置和 Close，不执行 SQL。
 
 ## 环境中的依赖取得与校验
 
@@ -24,4 +24,4 @@
 
 ## 历史
 
-初版 MVP 因另一版本 modernc 模块归档下载受限，曾使用 `ncruces/go-sqlite3 v0.30.1`。原始 driver 参考存档保留用于解释历史；当前实现已经采用用户指定的 glebarez/GORM 方案。
+初版 MVP 因另一版本 modernc 模块归档下载受限，曾使用 `ncruces/go-sqlite3 v0.30.1`。此前源码存档已移除；当前实现已经采用用户指定的 glebarez/GORM 方案。

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/yhlooo/motif/pkg/gitrepo"
@@ -113,7 +114,7 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte("+new")) {
 		t.Fatal("diff", rec.Body.String())
 	}
-	input := map[string]any{"first": item, "last": item, "path": base64.StdEncoding.EncodeToString([]byte("a.go")), "side": "new", "start": 1, "end": 2, "body": "<script>alert(1)</script>"}
+	input := map[string]any{"first": item, "last": item, "path": base64.StdEncoding.EncodeToString([]byte("a.go")), "side": "new", "start": 1, "end": 2, "body": "<script>alert(1)</script>", "view_version": cr.Version}
 	rec = call("POST", prefix+"/threads", input)
 	var threads []store.Thread
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &threads) != nil || len(threads) != 1 {
@@ -137,9 +138,34 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	if rec.Code == 200 {
 		t.Fatal("invalid side was accepted")
 	}
-	rec = call("PATCH", prefix+"/items/"+item+"/decision", map[string]string{"decision": "approved"})
+	rec = call("PATCH", prefix+"/items/"+item+"/decision", map[string]any{"decision": "approved", "view_version": cr.Version})
 	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte(`"status":"approved"`)) {
 		t.Fatal("approve", rec.Body.String())
+	}
+	// A new branch commit must refresh the existing CR and reject stale writes.
+	if e = os.WriteFile(path, []byte("new\nsecond\nthird\n"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	git("add", ".")
+	git("commit", "-m", "advance source")
+	rec = call("PATCH", prefix+"/items/"+item+"/decision", map[string]any{"decision": "approved", "view_version": cr.Version})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stale approval accepted: %d %s", rec.Code, rec.Body.String())
+	}
+	input["side"] = "new"
+	input["end"] = 2
+	rec = call("POST", prefix+"/threads", input)
+	if rec.Code != http.StatusConflict {
+		t.Fatal("stale comment accepted", rec.Body.String())
+	}
+	rec = call("GET", prefix, nil)
+	var refreshed store.Review
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &refreshed) != nil || refreshed.Version <= cr.Version || refreshed.Status != "in_review" || len(refreshed.Commits) != 2 {
+		t.Fatal("source not refreshed", rec.Body.String())
+	}
+	rec = call("GET", prefix+"/diff?first="+item+"&last="+item+"&view_version="+strconv.FormatInt(cr.Version, 10), nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatal("stale diff read mixed view versions", rec.Body.String())
 	}
 	rec = call("GET", "/", nil)
 	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte("Motif")) {

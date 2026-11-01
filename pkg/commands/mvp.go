@@ -88,22 +88,35 @@ func newHookCommand() *cobra.Command {
 		}
 		return nil
 	}})
-	hook.AddCommand(&cobra.Command{Use: "git <post-commit|post-checkout> [args...]", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		s, e := openStore()
-		if e == nil {
-			defer s.Close()
-			dir, err := os.Getwd()
-			if err != nil {
-				e = err
-			} else {
-				e = capture.Git(cmd.Context(), s, dir, args[0])
+	var installedOnly bool
+	gitCmd := &cobra.Command{Use: "git <hook-name> [args...]", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		dir, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintln(cmd.ErrOrStderr(), "motif capture:", err)
+			return nil
+		}
+		if installedOnly {
+			yes, e := integration.HasGitHook(cmd.Context(), dir, args[0])
+			if e != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), "motif capture:", e)
+				return nil
+			}
+			if !yes {
+				return nil
 			}
 		}
-		if e != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "motif capture: %v\n", e)
+		s, err := openStore()
+		if err == nil {
+			defer s.Close()
+			err = capture.GitNotification(cmd.Context(), s, dir, args[0], args[1:], cmd.InOrStdin())
+		}
+		if err != nil {
+			fmt.Fprintln(cmd.ErrOrStderr(), "motif capture:", err)
 		}
 		return nil
-	}})
+	}}
+	gitCmd.Flags().BoolVar(&installedOnly, "installed-only", false, "Ignore shared Git hooks in projects without a Motif installation")
+	hook.AddCommand(gitCmd)
 	return hook
 }
 func newPatchCommand() *cobra.Command {
@@ -275,7 +288,8 @@ func newInstallCommand() *cobra.Command {
 		for _, h := range m.Hooks {
 			fmt.Fprintln(cmd.OutOrStdout(), "Git hook:", h.Path)
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), "Codex hooks must be supported, enabled and trusted. Run a real tool call and inspect motif patch ls to verify capture.")
+		diagnostic := integration.Diagnose(cmd.Context(), r, m)
+		fmt.Fprintf(cmd.OutOrStdout(), "Codex hooks: %s — %s\n", diagnostic.Status, diagnostic.Detail)
 		return nil
 	}}
 	cmd.Flags().StringArrayVar(&agents, "agent", nil, "Agent to configure (repeatable; codex)")
@@ -388,4 +402,19 @@ func newWebCommand() *cobra.Command {
 	}}
 	cmd.Flags().StringVar(&address, "listen", "127.0.0.1:3939", "Loopback IP and port")
 	return cmd
+}
+
+func newDoctorCommand() *cobra.Command {
+	return &cobra.Command{Use: "doctor", Short: "Inspect effective Codex hooks and trust without executing them", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		s, r, _, err := openProject(cmd)
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		m, err := integration.Load(r)
+		if err != nil {
+			return err
+		}
+		return printJSON(cmd, integration.Diagnose(cmd.Context(), r, m))
+	}}
 }

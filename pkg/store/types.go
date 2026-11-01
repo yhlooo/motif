@@ -10,7 +10,13 @@ import (
 	"unicode/utf8"
 )
 
-func ID() string { return fmt.Sprintf("%x", rand.Text()) }
+func ID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 15) | 64
+	b[8] = (b[8] & 63) | 128
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
 func Now() int64 { return time.Now().UTC().UnixMicro() }
 
 type File struct {
@@ -122,6 +128,8 @@ type Call struct {
 	Status       string          `json:"status"`
 }
 type Event struct {
+	OriginID         string `json:"origin_event_id,omitempty"`
+	Projected        bool   `json:"projected,omitempty"`
 	ID               string `json:"id"`
 	WorktreeID       string `json:"worktree_id"`
 	Sequence         int64  `json:"sequence"`
@@ -153,6 +161,8 @@ type Cursor struct {
 	Version                               int64
 }
 type Observation struct {
+	KeepCall                    bool
+	ResumePair                  string
 	Worktree                    Worktree
 	Base                        string
 	State                       State
@@ -170,23 +180,31 @@ type Observation struct {
 	Receipt, Digest         string
 }
 type Review struct {
-	ID           string       `json:"id"`
-	RepositoryID string       `json:"repository_id"`
-	Title        string       `json:"title"`
-	Source       string       `json:"source"`
-	Target       string       `json:"target"`
-	SourceOID    string       `json:"source_oid"`
-	TargetOID    string       `json:"target_oid"`
-	Base         string       `json:"base"`
-	Head         string       `json:"head"`
-	Created      int64        `json:"created"`
-	Status       string       `json:"status"`
-	Integrity    string       `json:"integrity"`
-	Warning      string       `json:"warning,omitempty"`
-	Commits      []string     `json:"commits"`
-	Items        []ReviewItem `json:"items"`
+	CheckSource    bool         `json:"-"`
+	SourceRevision int64        `json:"-"`
+	ViewDigest     string       `json:"-"`
+	Version        int64        `json:"view_version"`
+	ID             string       `json:"id"`
+	RepositoryID   string       `json:"repository_id"`
+	Title          string       `json:"title"`
+	Source         string       `json:"source"`
+	Target         string       `json:"target"`
+	SourceOID      string       `json:"source_oid"`
+	TargetOID      string       `json:"target_oid"`
+	Base           string       `json:"base"`
+	Head           string       `json:"head"`
+	Created        int64        `json:"created"`
+	Status         string       `json:"status"`
+	Integrity      string       `json:"integrity"`
+	Warning        string       `json:"warning,omitempty"`
+	Commits        []string     `json:"commits"`
+	Items          []ReviewItem `json:"items"`
 }
 type ReviewItem struct {
+	StableKey   string   `json:"stable_key"`
+	Commit      string   `json:"commit_oid"`
+	SourceBatch string   `json:"source_batch_uid,omitempty"`
+	Digest      string   `json:"content_digest"`
 	ID          string   `json:"id"`
 	Kind        string   `json:"kind"`
 	Title       string   `json:"title"`
@@ -197,16 +215,22 @@ type ReviewItem struct {
 	After       State    `json:"-"`
 }
 type Thread struct {
-	ID       string    `json:"id"`
-	ReviewID string    `json:"review_id"`
-	First    string    `json:"first"`
-	Last     string    `json:"last"`
-	Path     string    `json:"path"`
-	Side     string    `json:"side"`
-	Start    int       `json:"start"`
-	End      int       `json:"end"`
-	Hash     string    `json:"hash"`
-	Comments []Comment `json:"comments"`
+	AnchorItem  string    `json:"anchor_item"`
+	BeforeID    string    `json:"before_snapshot"`
+	AfterID     string    `json:"after_snapshot"`
+	MappedStart int       `json:"mapped_start,omitempty"`
+	MappedEnd   int       `json:"mapped_end,omitempty"`
+	MappedPath  string    `json:"mapped_path,omitempty"`
+	ID          string    `json:"id"`
+	ReviewID    string    `json:"review_id"`
+	First       string    `json:"first"`
+	Last        string    `json:"last"`
+	Path        string    `json:"path"`
+	Side        string    `json:"side"`
+	Start       int       `json:"start"`
+	End         int       `json:"end"`
+	Hash        string    `json:"hash"`
+	Comments    []Comment `json:"comments"`
 }
 type Comment struct {
 	ID      string `json:"id"`

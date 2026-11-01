@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -19,8 +20,11 @@ import (
 var ErrNotFound = gorm.ErrRecordNotFound
 
 type Store struct {
-	db  *gorm.DB
-	Dir string
+	mu          sync.RWMutex
+	baseReaders map[string]func(context.Context, string) (State, error)
+	gitBlobs    map[string]map[string]func() ([]byte, error)
+	db          *gorm.DB
+	Dir         string
 }
 
 func Open(dir string) (*Store, error) {
@@ -53,7 +57,7 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	pool.SetMaxOpenConns(1)
-	s := &Store{db: db, Dir: dir}
+	s := &Store{db: db, Dir: dir, baseReaders: map[string]func(context.Context, string) (State, error){}, gitBlobs: map[string]map[string]func() ([]byte, error){}}
 	if err = s.migrate(); err != nil {
 		_ = pool.Close()
 		return nil, err
@@ -61,19 +65,52 @@ func Open(dir string) (*Store, error) {
 	return s, nil
 }
 func (s *Store) migrate() error {
-	// ORM-only refactoring does not change the v1 schema or rewrite existing data.
+	// Additive GORM migrations preserve v1 observations, review history and comment anchors.
 	if s.db.Migrator().HasTable(&schemaMigration{}) {
 		var version schemaMigration
 		if err := s.db.Take(&version).Error; err != nil {
 			return err
 		}
-		if version.Version != 1 {
+		if version.Version < 1 || version.Version > 6 {
 			return fmt.Errorf("unsupported database schema %d", version.Version)
 		}
 		for _, model := range models() {
+			if _, ok := model.(*referenceRecord); ok && version.Version < 6 {
+				continue
+			}
+			if _, ok := model.(*rewriteRecord); ok && version.Version < 6 {
+				continue
+			}
+			if _, ok := model.(*projectionRecord); ok && version.Version < 6 {
+				continue
+			}
 			if !s.db.Migrator().HasTable(model) {
 				return fmt.Errorf("incomplete database schema: missing table %s", model.(interface{ TableName() string }).TableName())
 			}
+		}
+		if version.Version < 6 {
+			return s.db.Transaction(func(tx *gorm.DB) error {
+				for _, entry := range []struct {
+					model  any
+					fields []string
+				}{{&batchRecord{}, []string{"OriginBatch"}}, {&schemaMigration{}, []string{"Generation"}}, {&snapshotRecord{}, []string{"Sparse"}}, {&snapshotEntryRecord{}, []string{"Deleted"}}, {&eventRecord{}, []string{"OriginID", "Projected"}}, {&reviewRecord{}, []string{"Version", "ViewDigest", "SourceRevision"}}, {&reviewItemRecord{}, []string{"StableKey", "Commit", "SourceBatch", "Digest", "Active"}}, {&threadRecord{}, []string{"AnchorItem", "BeforeID", "AfterID"}}} {
+					for _, field := range entry.fields {
+						if !tx.Migrator().HasColumn(entry.model, field) {
+							if err := tx.Migrator().AddColumn(entry.model, field); err != nil {
+								return err
+							}
+						}
+					}
+				}
+				for _, model := range []any{&rewriteRecord{}, &projectionRecord{}, &referenceRecord{}} {
+					if !tx.Migrator().HasTable(model) {
+						if err := tx.Migrator().CreateTable(model); err != nil {
+							return err
+						}
+					}
+				}
+				return tx.Model(&schemaMigration{}).Where("version = ?", version.Version).Update("version", 6).Error
+			})
 		}
 		return nil
 	}
@@ -81,7 +118,7 @@ func (s *Store) migrate() error {
 		if err := tx.AutoMigrate(models()...); err != nil {
 			return err
 		}
-		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&schemaMigration{Version: 1}).Error
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&schemaMigration{Version: 6}).Error
 	})
 }
 func (s *Store) Close() error {
@@ -93,6 +130,14 @@ func (s *Store) Close() error {
 }
 func (s *Store) update(ctx context.Context, fn func(*gorm.DB) error) error {
 	return s.db.WithContext(ctx).Transaction(fn)
+}
+func (s *Store) sourceUpdate(ctx context.Context, fn func(*gorm.DB) error) error {
+	return s.update(ctx, func(tx *gorm.DB) error {
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return tx.Model(&schemaMigration{}).Where("version = ?", 6).Update("generation", gorm.Expr("generation + ?", 1)).Error
+	})
 }
 func (s *Store) blobPath(hash string) (string, error) {
 	if len(hash) != 64 {
@@ -150,6 +195,21 @@ func (s *Store) Blob(hash string) ([]byte, error) {
 		return nil, err
 	}
 	b, err := os.ReadFile(p)
+	if errors.Is(err, os.ErrNotExist) {
+		s.mu.RLock()
+		sources := []func() ([]byte, error){}
+		for _, read := range s.gitBlobs[hash] {
+			sources = append(sources, read)
+		}
+		s.mu.RUnlock()
+		for _, read := range sources {
+			b, err = read()
+			if err == nil && ContentHash(b) == hash {
+				break
+			}
+			err = fmt.Errorf("Git content missing or corrupt for %s", hash)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("missing blob %s: %w", hash, err)
 	}
@@ -184,23 +244,37 @@ func (s *Store) Register(ctx context.Context, common, root, gitdir string) (w Wo
 	})
 	return
 }
-func snapshot(q *gorm.DB, id string) (Snapshot, error) {
+func (s *Store) snapshot(q *gorm.DB, id string) (Snapshot, error) {
 	var row snapshotRecord
 	if err := q.Where("id = ?", id).Take(&row).Error; err != nil {
 		return Snapshot{}, err
 	}
 	sn := Snapshot{ID: row.ID, WorktreeID: row.WorktreeID, Base: row.Base, Trigger: row.Trigger, Time: row.ObservedAt, State: State{}}
+	if row.Sparse {
+		base, ok, err := s.baseState(q, row.WorktreeID, row.Base)
+		if err != nil {
+			return sn, err
+		}
+		if !ok {
+			return sn, fmt.Errorf("Git base reader unavailable for %s", row.Base)
+		}
+		sn.State = Clone(base)
+	}
 	var entries []snapshotEntryRecord
 	if err := q.Where("snapshot_id = ?", id).Find(&entries).Error; err != nil {
 		return sn, err
 	}
 	for _, entry := range entries {
+		if entry.Deleted {
+			delete(sn.State, string(entry.Path))
+			continue
+		}
 		sn.State[string(entry.Path)] = File{Mode: entry.Mode, Hash: entry.Hash, OID: entry.OID, OutOfScope: entry.OutOfScope}
 	}
 	return sn, nil
 }
 func (s *Store) Snapshot(id string) (Snapshot, error) {
-	sn, err := snapshot(s.db, id)
+	sn, err := s.snapshot(s.db, id)
 	if err == nil {
 		err = s.validateState(sn.State)
 	}
@@ -217,15 +291,31 @@ func (s *Store) validateState(state State) error {
 	return nil
 }
 
-func saveSnapshot(tx *gorm.DB, w, base, trigger string, state State) (Snapshot, error) {
+func (s *Store) saveSnapshot(tx *gorm.DB, w, base, trigger string, state State) (Snapshot, error) {
 	sn := Snapshot{ID: ID(), WorktreeID: w, Base: base, Trigger: trigger, Time: Now(), State: state}
-	row := snapshotRecord{ID: sn.ID, WorktreeID: w, Base: base, Trigger: trigger, ObservedAt: sn.Time}
+	baseline, sparse, err := s.baseState(tx, w, base)
+	if err != nil {
+		return sn, err
+	}
+	row := snapshotRecord{Sparse: sparse, ID: sn.ID, WorktreeID: w, Base: base, Trigger: trigger, ObservedAt: sn.Time}
 	if err := tx.Create(&row).Error; err != nil {
 		return sn, err
 	}
 	entries := make([]snapshotEntryRecord, 0, len(state))
 	for p, f := range state {
+		if sparse {
+			if old, ok := baseline[p]; ok && old == f {
+				continue
+			}
+		}
 		entries = append(entries, snapshotEntryRecord{SnapshotID: sn.ID, Path: []byte(p), Mode: f.Mode, Hash: f.Hash, OID: f.OID, OutOfScope: f.OutOfScope})
+	}
+	if sparse {
+		for path := range baseline {
+			if _, ok := state[path]; !ok {
+				entries = append(entries, snapshotEntryRecord{SnapshotID: sn.ID, Path: []byte(path), Deleted: true})
+			}
+		}
 	}
 	if len(entries) > 0 {
 		if err := tx.CreateInBatches(entries, 100).Error; err != nil {
@@ -242,3 +332,38 @@ func cursor(q *gorm.DB, w string) (Cursor, error) {
 	return Cursor{SnapshotID: row.SnapshotID, Base: row.Base, ActiveCall: row.ActiveCall, Segment: row.Segment, Version: row.Version}, nil
 }
 func (s *Store) Cursor(w string) (Cursor, error) { return cursor(s.db, w) }
+
+func ContentHash(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }
+func (s *Store) SetBaseReader(common string, read func(context.Context, string) (State, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.baseReaders[common] = read
+}
+func (s *Store) RegisterGitBlob(data []byte, key string, read func() ([]byte, error)) string {
+	hash := ContentHash(data)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gitBlobs[hash] == nil {
+		s.gitBlobs[hash] = map[string]func() ([]byte, error){}
+	}
+	s.gitBlobs[hash][key] = read
+	return hash
+}
+func (s *Store) baseState(q *gorm.DB, w, oid string) (State, bool, error) {
+	var worktree worktreeRecord
+	if err := q.Select("repository_id").Where("id = ?", w).Take(&worktree).Error; err != nil {
+		return nil, false, err
+	}
+	var repository repositoryRecord
+	if err := q.Select("common_dir").Where("id = ?", worktree.RepositoryID).Take(&repository).Error; err != nil {
+		return nil, false, err
+	}
+	s.mu.RLock()
+	reader := s.baseReaders[repository.CommonDir]
+	s.mu.RUnlock()
+	if reader == nil {
+		return nil, false, nil
+	}
+	state, err := reader(q.Statement.Context, oid)
+	return state, true, err
+}

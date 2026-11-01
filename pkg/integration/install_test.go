@@ -189,3 +189,114 @@ func TestLinkedWorktreesShareHooksWithoutStacking(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamingHooksPreserveArgumentsInputAndOriginalStatus(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	c := exec.Command("git", "init")
+	c.Dir = root
+	if _, err := c.CombinedOutput(); err != nil {
+		t.Fatal(err)
+	}
+	hookdir := filepath.Join(root, ".git", "hooks")
+	originalLog := filepath.Join(t.TempDir(), "original")
+	motifLog := filepath.Join(t.TempDir(), "motif")
+	shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+	original := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(originalLog) + "\ncat >> " + shellQuote(originalLog) + "\nexit 7\n"
+	if err := os.WriteFile(filepath.Join(hookdir, "post-rewrite"), []byte(original), 0755); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "motif")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(motifLog) + "\ncat >> " + shellQuote(motifLog) + "\nexit 1\n"
+	if err := os.WriteFile(binary, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	r, err := gitrepo.Open(ctx, root, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := integration.Install(ctx, r, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(hookdir, "post-rewrite"), "amend", "extra argument")
+	cmd.Dir = root
+	cmd.Stdin = strings.NewReader("old new\nsecond pair\n")
+	if _, err = cmd.CombinedOutput(); err == nil {
+		t.Fatal("original failure was swallowed")
+	}
+	exit, ok := err.(*exec.ExitError)
+	if !ok || exit.ExitCode() != 7 {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(originalLog)
+	if err != nil || string(got) != "amend\nextra argument\nold new\nsecond pair\n" {
+		t.Fatalf("original stdin/argv: %q %v", got, err)
+	}
+	got, err = os.ReadFile(motifLog)
+	if err != nil || string(got) != "hook\ngit\npost-rewrite\namend\nextra argument\nold new\nsecond pair\n" {
+		t.Fatalf("Motif stdin/argv: %q %v", got, err)
+	}
+	if err = integration.Uninstall(r, m); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestExternalSharedHooksPathKeepsOtherProjectOwner(t *testing.T) {
+	ctx := context.Background()
+	shared := t.TempDir()
+	binary := filepath.Join(t.TempDir(), "motif")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	create := func() *gitrepo.Repository {
+		root := t.TempDir()
+		for _, args := range [][]string{{"init"}, {"config", "core.hooksPath", shared}} {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = root
+			if raw, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s %v", raw, err)
+			}
+		}
+		r, err := gitrepo.Open(ctx, root, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	a, b := create(), create()
+	ma, _, err := integration.Install(ctx, a, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mb, _, err := integration.Install(ctx, b, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ma.Hooks[0].Content, "--installed-only") {
+		t.Fatal("external shared hook would collect uninstalled projects")
+	}
+	if err = integration.Uninstall(a, ma); err != nil {
+		t.Fatal(err)
+	}
+	if err = integration.Verify(mb); err != nil {
+		t.Fatal("removed other project's hook", err)
+	}
+	if err = integration.Uninstall(b, mb); err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range mb.Hooks {
+		if _, err = os.Stat(hook.Path); !os.IsNotExist(err) {
+			t.Fatal("last owner left hook behind", err)
+		}
+	}
+}

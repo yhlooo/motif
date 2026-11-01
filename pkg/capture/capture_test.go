@@ -110,7 +110,7 @@ func (f *fixture) cr(source string) store.Review {
 	return r
 }
 
-func TestCaptureBatchStopAndFrozenReview(t *testing.T) {
+func TestCaptureBatchStopAndPersistedView(t *testing.T) {
 	f := newFixture(t)
 	f.write("dirty.txt", "external\n")
 	f.hook("PreToolUse", "one", "turn")
@@ -161,7 +161,7 @@ func TestCaptureBatchStopAndFrozenReview(t *testing.T) {
 	}
 	frozen, e := f.s.Review(f.w.RepositoryID, cr.ID)
 	if e != nil || frozen.Items[1].Title != batch.Title {
-		t.Fatal("review changed after source batch deletion", e)
+		t.Fatal("persisted view changed before refresh", e)
 	}
 	if out := f.hook("Stop", "", "turn"); out["decision"] != "block" {
 		t.Fatal("deleted batch must need regrouping")
@@ -190,7 +190,10 @@ func TestCaptureBatchStopAndFrozenReview(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	f.r.Store = f.s
+	f.r, e = gitrepo.Open(f.ctx, f.dir, f.s)
+	if e != nil {
+		t.Fatal(e)
+	}
 	reopened, e := f.s.Review(f.w.RepositoryID, cr.ID)
 	if e != nil || reopened.Items[1].Title != batch.Title {
 		t.Fatal("persistence", e)
@@ -329,6 +332,7 @@ func TestProjectDeletionPreservesSharedBlobs(t *testing.T) {
 	f := newFixture(t)
 	f.hook("PreToolUse", "one", "turn")
 	f.write("value.txt", "20\n")
+	f.write("private.txt", "exclusive\n")
 	f.hook("PostToolUse", "one", "turn")
 	f.git("add", ".")
 	f.commit("change")
@@ -340,6 +344,11 @@ func TestProjectDeletionPreservesSharedBlobs(t *testing.T) {
 		t.Fatal(e)
 	}
 	raw, _ := json.Marshal(capture.CodexInput{Event: "PreToolUse", CWD: other.dir, Session: "other", Turn: "turn", ToolID: "call", Tool: "Bash"})
+	if _, e = capture.Codex(f.ctx, f.s, raw); e != nil {
+		t.Fatal(e)
+	}
+	other.write("value.txt", "20\n")
+	raw, _ = json.Marshal(capture.CodexInput{Event: "PostToolUse", CWD: other.dir, Session: "other", Turn: "turn", ToolID: "call", Tool: "Bash"})
 	if _, e = capture.Codex(f.ctx, f.s, raw); e != nil {
 		t.Fatal(e)
 	}
@@ -363,7 +372,7 @@ func TestProjectDeletionPreservesSharedBlobs(t *testing.T) {
 		t.Fatal("deleted other project's snapshot", e)
 	}
 	b, e := f.s.Blob(sharedHash)
-	if e != nil || string(b) != "10\n" {
+	if e != nil || string(b) != "20\n" {
 		t.Fatal("deleted shared blob", e)
 	}
 }

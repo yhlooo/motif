@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ func Handler(service *review.Service, host string) http.Handler {
 	s.mux.HandleFunc("POST /api/code-reviews/preview", s.preview)
 	s.mux.HandleFunc("POST /api/code-reviews", s.create)
 	s.mux.HandleFunc("GET /api/code-reviews/{id}", s.get)
+	s.mux.HandleFunc("POST /api/code-reviews/{id}/refresh", s.get)
 	s.mux.HandleFunc("GET /api/code-reviews/{id}/diff", s.diff)
 	s.mux.HandleFunc("PATCH /api/code-reviews/{id}/items/{item}/decision", s.decision)
 	s.mux.HandleFunc("GET /api/code-reviews/{id}/threads", s.threads)
@@ -103,6 +105,9 @@ func send(w http.ResponseWriter, v any) {
 }
 func fail(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
+	if errors.Is(err, store.ErrStaleView) {
+		status = http.StatusConflict
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		status = http.StatusNotFound
 	}
@@ -140,6 +145,13 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	for i := range rs {
+		rs[i], err = s.service.Refresh(r.Context(), rs[i].ID)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+	}
 	send(w, rs)
 }
 func (s *server) preview(w http.ResponseWriter, r *http.Request) {
@@ -173,7 +185,7 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	send(w, cr)
 }
 func (s *server) get(w http.ResponseWriter, r *http.Request) {
-	cr, err := s.service.Repo.Store.Review(s.rid(), r.PathValue("id"))
+	cr, err := s.service.Refresh(r.Context(), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
 		return
@@ -181,10 +193,17 @@ func (s *server) get(w http.ResponseWriter, r *http.Request) {
 	send(w, cr)
 }
 func (s *server) diff(w http.ResponseWriter, r *http.Request) {
-	cr, err := s.service.Repo.Store.Review(s.rid(), r.PathValue("id"))
+	cr, err := s.service.Refresh(r.Context(), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
 		return
+	}
+	if version := r.URL.Query().Get("view_version"); version != "" {
+		expected, e := strconv.ParseInt(version, 10, 64)
+		if e != nil || expected != cr.Version {
+			fail(w, store.ErrStaleView)
+			return
+		}
 	}
 	b, a, err := review.Selection(cr, r.URL.Query().Get("first"), r.URL.Query().Get("last"))
 	if err != nil {
@@ -201,23 +220,64 @@ func (s *server) diff(w http.ResponseWriter, r *http.Request) {
 func (s *server) decision(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Decision string `json:"decision"`
+		Version  int64  `json:"view_version"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	if err := s.service.Repo.Store.Decision(r.Context(), s.rid(), r.PathValue("id"), r.PathValue("item"), in.Decision); err != nil {
+	if _, err := s.service.Refresh(r.Context(), r.PathValue("id")); err != nil {
+		fail(w, err)
+		return
+	}
+	if err := s.service.Repo.Store.Decision(r.Context(), s.rid(), r.PathValue("id"), r.PathValue("item"), in.Decision, in.Version); err != nil {
 		fail(w, err)
 		return
 	}
 	s.get(w, r)
 }
 func (s *server) threads(w http.ResponseWriter, r *http.Request) {
-	ts, err := s.service.Repo.Store.Threads(s.rid(), r.PathValue("id"))
+	cr, err := s.service.Refresh(r.Context(), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	send(w, ts)
+	if value := r.URL.Query().Get("view_version"); value != "" {
+		expected, e := strconv.ParseInt(value, 10, 64)
+		if e != nil || expected != cr.Version {
+			fail(w, store.ErrStaleView)
+			return
+		}
+	}
+	first, last := r.URL.Query().Get("first"), r.URL.Query().Get("last")
+	if first != "" || last != "" {
+		mapped, e := s.service.MappedThreads(r.Context(), cr, first, last)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		send(w, mapped)
+		return
+	}
+	ts, err := s.service.Repo.Store.Threads(s.rid(), cr.ID)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	active := map[string]bool{}
+	for _, item := range cr.Items {
+		active[item.ID] = true
+	}
+	visible := []store.Thread{}
+	for _, thread := range ts {
+		anchor := thread.AnchorItem
+		if anchor == "" {
+			anchor = thread.Last
+		}
+		if active[anchor] {
+			visible = append(visible, thread)
+		}
+	}
+	send(w, visible)
 }
 func (s *server) author(r *http.Request) string {
 	a := s.service.Repo.Config(r.Context(), "user.name")
@@ -228,20 +288,25 @@ func (s *server) author(r *http.Request) string {
 }
 func (s *server) thread(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		First string `json:"first"`
-		Last  string `json:"last"`
-		Path  string `json:"path"`
-		Side  string `json:"side"`
-		Start int    `json:"start"`
-		End   int    `json:"end"`
-		Body  string `json:"body"`
+		First   string `json:"first"`
+		Last    string `json:"last"`
+		Path    string `json:"path"`
+		Side    string `json:"side"`
+		Start   int    `json:"start"`
+		End     int    `json:"end"`
+		Body    string `json:"body"`
+		Version int64  `json:"view_version"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	cr, err := s.service.Repo.Store.Review(s.rid(), r.PathValue("id"))
+	cr, err := s.service.Refresh(r.Context(), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
+		return
+	}
+	if in.Version != cr.Version {
+		fail(w, store.ErrStaleView)
 		return
 	}
 	t := store.Thread{First: in.First, Last: in.Last, Path: in.Path, Side: in.Side, Start: in.Start, End: in.End}

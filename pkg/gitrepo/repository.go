@@ -51,6 +51,7 @@ func Open(ctx context.Context, dir string, s *store.Store) (*Repository, error) 
 	if rel, e := filepath.Rel(r.Root, s.Dir); e != nil || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
 		return nil, fmt.Errorf("Motif data directory must be outside the worktree")
 	}
+	r.Store.SetBaseReader(r.CommonDir, r.Tree)
 	return r, nil
 }
 func (r *Repository) Git(ctx context.Context, args ...string) ([]byte, error) {
@@ -111,6 +112,9 @@ func (r *Repository) Tree(ctx context.Context, oid string) (store.State, error) 
 			continue
 		}
 		header, path, ok := bytes.Cut(entry, []byte{'\t'})
+		if r.managedPath(string(path)) {
+			continue
+		}
 		fields := strings.Fields(string(header))
 		if !ok || len(fields) != 3 {
 			return nil, fmt.Errorf("invalid git tree record")
@@ -123,10 +127,8 @@ func (r *Repository) Tree(ctx context.Context, oid string) (store.State, error) 
 			if e != nil {
 				return nil, e
 			}
-			f.Hash, e = r.Store.PutBlob(content)
-			if e != nil {
-				return nil, e
-			}
+			object := fields[2]
+			f.Hash = r.Store.RegisterGitBlob(content, r.CommonDir+"/"+object, func() ([]byte, error) { return r.Git(context.Background(), "cat-file", "blob", object) })
 		}
 		state[string(path)] = f
 	}
@@ -202,6 +204,9 @@ func (r *Repository) Worktree(ctx context.Context, base store.State, previous ..
 	}
 	state := store.State{}
 	for p := range paths {
+		if r.managedPath(p) {
+			continue
+		}
 		if !validPath(p) {
 			return nil, fmt.Errorf("unsafe repository path %q", p)
 		}
@@ -277,9 +282,12 @@ func (r *Repository) Worktree(ctx context.Context, base store.State, previous ..
 		default:
 			return nil, fmt.Errorf("unsupported special file %s", store.DisplayPath(p))
 		}
-		f.Hash, e = r.Store.PutBlob(content)
-		if e != nil {
-			return nil, e
+		f.Hash = store.ContentHash(content)
+		if original, ok := base[p]; !ok || original.Hash != f.Hash || original.OutOfScope {
+			f.Hash, e = r.Store.PutBlob(content)
+			if e != nil {
+				return nil, e
+			}
 		}
 		state[p] = f
 	}
@@ -409,4 +417,15 @@ func (r *Repository) content(f store.File) ([]byte, error) {
 		return []byte("Subproject commit " + f.OID + "\n"), nil
 	}
 	return r.Store.Blob(f.Hash)
+}
+
+func (r *Repository) managedPath(path string) bool {
+	candidate := filepath.Join(r.Root, path)
+	for _, directory := range []string{r.GitDir, r.CommonDir} {
+		relative, err := filepath.Rel(directory, candidate)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
