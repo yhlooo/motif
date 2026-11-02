@@ -244,10 +244,24 @@ func checkAgents(agents []string) error {
 }
 func newInstallCommand() *cobra.Command {
 	var agents []string
+	var yes bool
 	cmd := &cobra.Command{Use: "install", Short: "Install project-local Codex and Git hooks", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		if e := checkAgents(agents); e != nil {
 			return e
 		}
+		s, r, _, e := openProject(cmd)
+		if e != nil {
+			return e
+		}
+		defer s.Close()
+		plan, e := integration.PlanHooks(cmd.Context(), r)
+		if e != nil {
+			return e
+		}
+		if plan.Override {
+			fmt.Fprintf(cmd.OutOrStdout(), "WARNING: inherited core.hooksPath = %s\nSet repository-local core.hooksPath to %s. Hooks from the inherited directory (including Git LFS hooks) will no longer run in this repository. Existing hooks in the destination will be preserved and chained. Linked worktrees of this repository share the local setting.\n", plan.Inherited, plan.Path)
+		}
+		reader := bufio.NewReader(cmd.InOrStdin())
 		if len(agents) == 0 {
 			if !terminal() {
 				return fmt.Errorf("noninteractive install requires --agent codex")
@@ -259,7 +273,7 @@ func newInstallCommand() *cobra.Command {
 				prompt = "Supported agents: [x] codex. Install? [Y/n] "
 			}
 			fmt.Fprint(cmd.OutOrStdout(), prompt)
-			line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+			line, e := reader.ReadString('\n')
 			if e != nil {
 				return e
 			}
@@ -268,16 +282,24 @@ func newInstallCommand() *cobra.Command {
 				return nil
 			}
 		}
-		s, r, _, e := openProject(cmd)
-		if e != nil {
-			return e
+		if plan.Override && !yes {
+			if !terminal() {
+				return fmt.Errorf("changing inherited hooks requires --yes; no integrations installed")
+			}
+			fmt.Fprint(cmd.OutOrStdout(), "Use repository-local hooks? [y/N] ")
+			line, e := reader.ReadString('\n')
+			if e != nil {
+				return e
+			}
+			if !strings.EqualFold(strings.TrimSpace(line), "y") {
+				return nil
+			}
 		}
-		defer s.Close()
 		binary, e := os.Executable()
 		if e != nil {
 			return e
 		}
-		m, added, e := integration.Install(cmd.Context(), r, binary)
+		m, added, e := integration.InstallWithOptions(cmd.Context(), r, binary, integration.InstallOptions{ConfirmLocalHooksPath: plan.Override})
 		if e != nil {
 			return e
 		}
@@ -294,6 +316,7 @@ func newInstallCommand() *cobra.Command {
 		return nil
 	}}
 	cmd.Flags().StringArrayVar(&agents, "agent", nil, "Agent to configure (repeatable; codex)")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Confirm switching inherited hooks to repository-local hooks")
 	return cmd
 }
 func newUninstallCommand() *cobra.Command {

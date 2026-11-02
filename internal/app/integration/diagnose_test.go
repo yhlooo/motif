@@ -31,6 +31,7 @@ func TestDiagnoseReportsEffectiveHookTrust(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	root = r.Root // Git canonicalizes /var to /private/var on macOS.
 	m, _, err := integration.Install(context.Background(), r, "/owned/motif")
 	if err != nil {
 		t.Fatal(err)

@@ -13,3 +13,18 @@ commands.VersionDesc:
 commands.VersionOptsOutputFormatDesc:
     hash: sha1-43a90ee888e64bc5efd1f81974af5fafee8ab9a6
     other: 输出格式 (json, yaml)
+integration.CodexInterruptStatus:
+    hash: sha1-8fab0e10b7a4ca0dfc47d632c0b6381dff1b3d18
+    other: Motif 中断快照
+integration.CodexPostToolUseStatus:
+    hash: sha1-72f68166bbb13328f2255e52e4bbe1d61f7d0ed2
+    other: Motif 工具运行后快照
+integration.CodexPreToolUseStatus:
+    hash: sha1-ea35ad69112ec93fdf459111da0e879370c0a53e
+    other: Motif 工具运行前快照
+integration.CodexSessionEndStatus:
+    hash: sha1-6b3225d85e9f1246eb81cf4ad40c21192b94e11c
+    other: Motif 会话结束快照
+integration.CodexStopStatus:
+    hash: sha1-ec797cc77ab7083f61e5ec5b784fa6b26ef3b462
+    other: Motif 回合结束快照

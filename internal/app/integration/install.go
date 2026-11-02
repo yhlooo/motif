@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/yhlooo/motif/internal/i18n"
 )
 
 const begin = "# BEGIN MOTIF CODEX\n"
@@ -28,16 +29,19 @@ type File struct {
 	Shared  bool   `json:"shared,omitempty"`
 }
 type Manifest struct {
-	OwnerFile     string `json:"owner_file,omitempty"`
-	ConfigCreated bool   `json:"config_created,omitempty"`
-	Config        File   `json:"config"`
-	Hooks         []File `json:"hooks"`
+	OwnerFile      string `json:"owner_file,omitempty"`
+	ConfigCreated  bool   `json:"config_created,omitempty"`
+	Config         File   `json:"config"`
+	Hooks          []File `json:"hooks"`
+	LocalHooksPath string `json:"local_hooks_path,omitempty"`
 }
 
-func manifestPath(r *workspace.Project) string { return filepath.Join(r.GitDir, "motif-install.json") }
+func manifestPath(r *workspace.Project) string {
+	return filepath.Join(r.GitDir, "motif", "install.json")
+}
 func Load(r *workspace.Project) (Manifest, error) {
 	var m Manifest
-	raw, e := os.ReadFile(manifestPath(r))
+	raw, e := readManifest(r.GitDir)
 	if e != nil {
 		return m, e
 	}
@@ -69,11 +73,11 @@ func atomic(path string, data []byte, mode os.FileMode) error {
 	}
 	return os.Rename(f.Name(), path)
 }
-func configBlock(binary string) string {
+func configBlock(ctx context.Context, binary string) string {
 	var b strings.Builder
 	b.WriteString(begin)
-	for _, event := range []string{"PreToolUse", "PostToolUse", "Stop", "Interrupt", "SessionEnd"} {
-		fmt.Fprintf(&b, "[[hooks.%s]]\n[[hooks.%s.hooks]]\ntype = \"command\"\ncommand = %s\ntimeout = 30\nasync = false\n", event, event, strconv.Quote(quote(binary)+" hook codex || true"))
+	for _, hook := range codexHooks {
+		fmt.Fprintf(&b, "[[hooks.%s]]\n[[hooks.%s.hooks]]\ntype = \"command\"\ncommand = %s\nstatusMessage = %s\ntimeout = 30\nasync = false\n", hook.event, hook.event, strconv.Quote(quote(binary)+" hook codex || true"), strconv.Quote(i18n.TContext(ctx, hook.statusMessage)))
 	}
 	b.WriteString(end)
 	return b.String()
@@ -90,35 +94,31 @@ func block(data []byte) ([]byte, error) {
 	return data[a : b+len(end)], nil
 }
 func validateTOML(data []byte) error { var v map[string]any; return toml.Unmarshal(data, &v) }
+
+// Install repairs missing integrations as well as installing new ones.
 func Install(ctx context.Context, r *workspace.Project, binary string) (Manifest, bool, error) {
-	m, err := Load(r)
-	if err == nil {
-		if err = Verify(m); err != nil {
-			return m, false, err
-		}
-		complete := map[string]bool{}
-		for _, hook := range m.Hooks {
-			complete[filepath.Base(hook.Path)] = true
-		}
-		if complete["post-commit"] && complete["post-checkout"] && complete["post-rewrite"] && complete["reference-transaction"] {
-			return m, false, nil
-		}
-	}
+	return InstallWithOptions(ctx, r, binary, InstallOptions{})
+}
+
+type InstallOptions struct{ ConfirmLocalHooksPath bool }
+
+func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string, options InstallOptions) (Manifest, bool, error) {
+	old, err := Load(r)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return m, false, err
+		return old, false, err
 	}
-	// Shared hooksPath must not cause project installation to edit another project or global hooks.
-	hooks := r.Config(ctx, "core.hooksPath")
-	if hooks == "" {
-		hooks = filepath.Join(r.CommonDir, "hooks")
-	} else if !filepath.IsAbs(hooks) {
-		hooks = filepath.Join(r.Root, hooks)
+	plan, err := PlanHooks(ctx, r)
+	if err != nil {
+		return old, false, err
 	}
+	if plan.Override && !options.ConfirmLocalHooksPath {
+		return old, false, fmt.Errorf("switching inherited core.hooksPath to %s requires confirmation; global hooks will no longer run in this repository", plan.Path)
+	}
+	m := old
 	config := filepath.Join(r.Root, ".codex", "config.toml")
 	if info, e := os.Lstat(config); e == nil && !info.Mode().IsRegular() {
 		return m, false, fmt.Errorf("refuse to replace non-regular Codex config")
 	}
-
 	raw, err := os.ReadFile(config)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return m, false, err
@@ -130,155 +130,195 @@ func Install(ctx context.Context, r *workspace.Project, binary string) (Manifest
 	if err != nil {
 		return m, false, err
 	}
-	if existing != nil && string(existing) != m.Config.Content {
-		return m, false, fmt.Errorf("unmanaged Motif block already exists; inspect %s", config)
+	if existing != nil && string(existing) != old.Config.Content {
+		return m, false, fmt.Errorf("Motif config was changed; inspect %s", config)
 	}
 	next := append([]byte{}, raw...)
 	if existing == nil {
-		_, statErr := os.Stat(config)
-		m.ConfigCreated = os.IsNotExist(statErr)
-		m.Config = File{Path: config, Content: configBlock(binary)}
+		m.ConfigCreated = false
+		if _, e := os.Stat(config); os.IsNotExist(e) {
+			m.ConfigCreated = true
+		}
+		m.Config = File{Path: config, Content: configBlock(ctx, binary)}
 		next = append(next, []byte("\n"+m.Config.Content)...)
+	} else {
+		// Only update a block that still matches our recorded installation.
+		m.Config = File{Path: config, Content: configBlock(ctx, binary)}
+		next = bytes.Replace(next, existing, []byte(m.Config.Content), 1)
 	}
-	m.Hooks = nil
 	if err = validateTOML(next); err != nil {
-		return m, false, fmt.Errorf("cannot merge Codex hooks: %w", err)
-	}
-	for _, name := range []string{"post-commit", "post-checkout", "post-rewrite", "reference-transaction"} {
-		path := filepath.Join(hooks, name)
-		_, err := os.Lstat(path)
-		backup := ""
-		shared := false
-		if err == nil {
-			info, e := os.Lstat(path)
-			if e != nil {
-				return m, false, e
-			}
-			if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
-				return m, false, fmt.Errorf("refuse to replace non-file hook %s", path)
-			}
-			data, e := os.ReadFile(path)
-			if e != nil {
-				return m, false, e
-			}
-			shared = bytes.HasPrefix(data, []byte("#!/bin/sh\n# Managed by Motif;"))
-			backup = path + ".motif-original"
-			if shared {
-				if _, e = os.Lstat(backup); os.IsNotExist(e) {
-					backup = ""
-				} else if e != nil {
-					return m, false, e
-				}
-			}
-			if !shared {
-				if _, e = os.Lstat(backup); e == nil {
-					return m, false, fmt.Errorf("backup already exists: %s", backup)
-				} else if !os.IsNotExist(e) {
-					return m, false, e
-				}
-			}
-		} else if !os.IsNotExist(err) {
-			return m, false, err
-		}
-		content := hookScript(binary, name, backup)
-		if !within(r.Root, hooks) && !within(r.CommonDir, hooks) {
-			content = strings.Replace(content, " hook git ", " hook git --installed-only ", 1)
-		}
-
-		if shared {
-			data, e := os.ReadFile(path)
-			if e != nil {
-				return m, false, e
-			}
-			if string(data) != content {
-				return m, false, fmt.Errorf("shared Motif hook conflicts with this binary: %s", path)
-			}
-		}
-		m.Hooks = append(m.Hooks, File{Path: path, Content: content, Backup: backup, Shared: shared})
-	}
-	// Stage validation before touching files; roll back ordinary write failures.
-	type original struct {
-		path   string
-		data   []byte
-		mode   os.FileMode
-		exists bool
-	}
-	var originals []original
-	write := func(path string, data []byte, mode os.FileMode) error {
-		old, e := os.ReadFile(path)
-		exists := e == nil
-		if e != nil && !os.IsNotExist(e) {
-			return e
-		}
-		oldMode := mode
-		if info, e := os.Stat(path); e == nil {
-			oldMode = info.Mode().Perm()
-		}
-		originals = append(originals, original{path, old, oldMode, exists})
-		return atomic(path, data, mode)
-	}
-	rollback := func() {
-		for i := len(originals) - 1; i >= 0; i-- {
-			o := originals[i]
-			if o.exists {
-				_ = atomic(o.path, o.data, o.mode)
-			} else {
-				_ = os.Remove(o.path)
-			}
-		}
-		for _, h := range m.Hooks {
-			if h.Backup != "" && !h.Shared {
-				if _, e := os.Stat(h.Backup); e == nil {
-					_ = os.Remove(h.Path)
-					_ = os.Rename(h.Backup, h.Path)
-				}
-			}
-		}
-	}
-	mode := os.FileMode(0600)
-	if info, e := os.Stat(config); e == nil {
-		mode = info.Mode().Perm()
-	}
-	if err = write(config, next, mode); err != nil {
-		rollback()
 		return m, false, err
 	}
-	for _, h := range m.Hooks {
-		if h.Shared {
-			continue
+	m.Hooks = nil
+	backupMoves := map[string]string{}
+	// Validate all destinations and former hooks before making any changes.
+	for _, name := range []string{"post-commit", "post-checkout", "post-rewrite", "reference-transaction"} {
+		path := filepath.Join(plan.Path, name)
+		h := File{Path: path}
+		var known *File
+		fromOther := false
+		for _, previous := range old.Hooks {
+			if previous.Path == path {
+				copy := previous
+				known = &copy
+			}
 		}
-		if h.Backup != "" {
-			if err = os.Rename(h.Path, h.Backup); err != nil {
-				rollback()
+		if known == nil {
+			known, err = ownedHook(r, plan.Path, path)
+			fromOther = known != nil
+			if err != nil {
 				return m, false, err
 			}
 		}
-		if err = write(h.Path, []byte(h.Content), 0755); err != nil {
-			rollback()
+		data, e := os.ReadFile(path)
+		if e != nil && !os.IsNotExist(e) {
+			return m, false, e
+		}
+		if info, statErr := os.Lstat(path); statErr == nil {
+			if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+				return m, false, fmt.Errorf("refuse to replace non-file hook %s", path)
+			}
+			if info.Mode()&os.ModeSymlink != 0 && os.IsNotExist(e) {
+				return m, false, fmt.Errorf("refuse to replace dangling hook symlink %s", path)
+			}
+		} else if !os.IsNotExist(statErr) {
+			return m, false, statErr
+		}
+		if known != nil && (os.IsNotExist(e) || string(data) == known.Content) {
+			h.Backup = known.Backup
+			h.Shared = known.Shared || fromOther
+		} else if e == nil {
+			if bytes.Contains(data, []byte(hookBegin)) || bytes.Contains(data, []byte(hookEnd)) || bytes.HasPrefix(data, []byte("#!/bin/sh\n# Managed by Motif;")) {
+				return m, false, fmt.Errorf("modified or unregistered Motif hook: %s", path)
+			}
+			h.Backup = backupPath(r, plan.Path, name)
+			if _, e = os.Lstat(h.Backup); !os.IsNotExist(e) {
+				return m, false, fmt.Errorf("backup already exists or cannot be inspected: %s", h.Backup)
+			}
+		}
+		if h.Backup != "" && known != nil && h.Backup == known.Backup {
+			if _, e = os.Lstat(h.Backup); e != nil {
+				return m, false, fmt.Errorf("original hook backup is unavailable: %w", e)
+			}
+		}
+		// Move legacy backups out of .git/hooks into the Motif metadata directory.
+		if known != nil && h.Backup != "" && within(r.CommonDir, h.Backup) && !within(filepath.Join(r.CommonDir, "motif"), h.Backup) && !fromOther {
+			destination := backupPath(r, plan.Path, name)
+			if _, e := os.Lstat(destination); !os.IsNotExist(e) {
+				return m, false, fmt.Errorf("backup destination already exists: %s", destination)
+			}
+			backupMoves[h.Backup] = destination
+			h.Backup = destination
+		}
+		h.Content = hookScript(binary, name, h.Backup)
+		if !within(r.Root, plan.Path) && !within(r.CommonDir, plan.Path) {
+			h.Content = strings.Replace(h.Content, " hook git ", " hook git --installed-only ", 1)
+		}
+		if known != nil && known.Content != h.Content && fromOther {
+			return m, false, fmt.Errorf("shared Motif hook conflicts with this binary: %s", path)
+		}
+		m.Hooks = append(m.Hooks, h)
+	}
+	keep, err := otherOwners(r, old)
+	if err != nil {
+		return m, false, err
+	}
+	for _, h := range old.Hooks {
+		if keep[h.Path] {
+			for _, updated := range m.Hooks {
+				if updated.Path == h.Path && updated.Content != h.Content {
+					return m, false, fmt.Errorf("shared hook must remain compatible with its other owners: %s", h.Path)
+				}
+			}
+		}
+		if filepath.Dir(h.Path) == plan.Path || keep[h.Path] {
+			continue
+		}
+		if err = verifyHook(h, true); err != nil {
 			return m, false, err
 		}
 	}
-	m.OwnerFile = filepath.Join(hooks, ".motif-projects", fmt.Sprintf("%x.json", sha256.Sum256([]byte(r.GitDir))))
-	ownerData, e := json.Marshal(map[string]string{"git_dir": r.GitDir})
-	if e != nil {
-		rollback()
-		return m, false, e
-	}
-	if err = write(m.OwnerFile, ownerData, 0600); err != nil {
-		rollback()
+	tx := &fileTransaction{}
+	defer tx.rollback()
+	if err = tx.write(config, next, 0600); err != nil {
 		return m, false, err
+	}
+	for source, destination := range backupMoves {
+		if err = tx.move(source, destination); err != nil {
+			return m, false, err
+		}
+	}
+	for _, h := range m.Hooks {
+		if h.Backup != "" {
+			if _, e := os.Lstat(h.Backup); os.IsNotExist(e) {
+				if err = tx.move(h.Path, h.Backup); err != nil {
+					return m, false, err
+				}
+			}
+		}
+		if err = tx.write(h.Path, []byte(h.Content), 0755); err != nil {
+			return m, false, err
+		}
+	}
+	for _, h := range old.Hooks {
+		if filepath.Dir(h.Path) == plan.Path || keep[h.Path] {
+			continue
+		}
+		if err = tx.remove(h.Path); err != nil {
+			return m, false, err
+		}
+		if h.Backup != "" {
+			if err = tx.move(h.Backup, h.Path); err != nil {
+				return m, false, err
+			}
+		}
+	}
+	m.OwnerFile = filepath.Join(ownerDirectory(r, plan.Path), fmt.Sprintf("%x.json", sha256.Sum256([]byte(r.GitDir))))
+	ownerData, _ := json.Marshal(map[string]string{"git_dir": r.GitDir})
+	if err = tx.write(m.OwnerFile, ownerData, 0600); err != nil {
+		return m, false, err
+	}
+	if old.OwnerFile != "" && old.OwnerFile != m.OwnerFile {
+		if err = tx.remove(old.OwnerFile); err != nil {
+			return m, false, err
+		}
+	}
+	if plan.Override {
+		m.LocalHooksPath = plan.Path
+	}
+	// Carry ownership of a repository-level override across linked worktrees.
+	if m.LocalHooksPath == "" {
+		m.LocalHooksPath, err = managedLocalHooksPath(r)
+		if err != nil {
+			return m, false, err
+		}
+	}
+	if plan.Override {
+		configPath := filepath.Join(r.CommonDir, "config")
+		if err = tx.remember(configPath); err != nil {
+			return m, false, err
+		}
+		if _, err = r.Git(ctx, "config", "--local", "core.hooksPath", plan.Path); err != nil {
+			return m, false, err
+		}
+		tx.changed = true
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
-	if err == nil {
-		err = write(manifestPath(r), data, 0600)
-	}
 	if err != nil {
-		rollback()
 		return m, false, err
 	}
-	return m, true, nil
+	if err = tx.write(manifestPath(r), data, 0600); err != nil {
+		return m, false, err
+	}
+	if err = tx.remove(filepath.Join(r.GitDir, "motif-install.json")); err != nil {
+		return m, false, err
+	}
+	changed := tx.changed
+	tx.committed = true
+	return m, changed, nil
 }
-func Verify(m Manifest) error {
+func Verify(m Manifest) error { return verify(m, false) }
+func verify(m Manifest, allowMissing bool) error {
 	data, err := os.ReadFile(m.Config.Path)
 	if err != nil {
 		return err
@@ -294,34 +334,15 @@ func Verify(m Manifest) error {
 		return fmt.Errorf("Motif config was changed: %s", m.Config.Path)
 	}
 	for _, h := range m.Hooks {
-		if h.Backup != "" {
-			info, e := os.Lstat(h.Backup)
-			if e != nil {
-				return fmt.Errorf("original hook backup is unavailable: %w", e)
-			}
-			if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
-				return fmt.Errorf("original hook backup was changed: %s", h.Backup)
-			}
-		}
-		data, e := os.ReadFile(h.Path)
-		if e != nil {
-			return e
-		}
-		if string(data) != h.Content {
-			return fmt.Errorf("Motif hook was changed: %s", h.Path)
-		}
-		info, e := os.Stat(h.Path)
-		if e != nil {
-			return e
-		}
-		if info.Mode()&0111 == 0 {
-			return fmt.Errorf("Motif hook is not executable: %s", h.Path)
+		if err := verifyHook(h, allowMissing); err != nil {
+			return err
 		}
 	}
+
 	return nil
 }
 func Uninstall(r *workspace.Project, m Manifest) error {
-	if err := Verify(m); err != nil {
+	if err := verify(m, true); err != nil {
 		return fmt.Errorf("preserving modified configuration: %w", err)
 	}
 	keep, err := otherOwners(r, m)
@@ -352,7 +373,7 @@ func Uninstall(r *workspace.Project, m Manifest) error {
 		if keep[h.Path] {
 			continue
 		}
-		if err = os.Remove(h.Path); err != nil {
+		if err = os.Remove(h.Path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		if h.Backup != "" {
@@ -367,7 +388,20 @@ func Uninstall(r *workspace.Project, m Manifest) error {
 		}
 		_ = os.Remove(filepath.Dir(m.OwnerFile))
 	}
-	return os.Remove(manifestPath(r))
+	if m.LocalHooksPath != "" && len(keep) == 0 {
+		current, e := r.Git(context.Background(), "config", "--local", "--get", "core.hooksPath")
+		if e == nil && strings.TrimSpace(string(current)) == m.LocalHooksPath {
+			if _, e = r.Git(context.Background(), "config", "--local", "--unset-all", "core.hooksPath"); e != nil {
+				return e
+			}
+		}
+	}
+	for _, path := range []string{manifestPath(r), filepath.Join(r.GitDir, "motif-install.json")} {
+		if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func within(parent, path string) bool {
@@ -377,7 +411,10 @@ func within(parent, path string) bool {
 func otherOwners(r *workspace.Project, m Manifest) (map[string]bool, error) {
 	keep := map[string]bool{}
 	if len(m.Hooks) > 0 {
-		directory := filepath.Join(filepath.Dir(m.Hooks[0].Path), ".motif-projects")
+		directory := ownerDirectory(r, filepath.Dir(m.Hooks[0].Path))
+		if m.OwnerFile != "" {
+			directory = filepath.Dir(m.OwnerFile)
+		}
 		entries, e := os.ReadDir(directory)
 		if e != nil && !os.IsNotExist(e) {
 			return nil, e
@@ -399,7 +436,7 @@ func otherOwners(r *workspace.Project, m Manifest) (map[string]bool, error) {
 			if owner.GitDir == r.GitDir {
 				continue
 			}
-			data, e = os.ReadFile(filepath.Join(owner.GitDir, "motif-install.json"))
+			data, e = readManifest(owner.GitDir)
 			if os.IsNotExist(e) {
 				continue
 			}
@@ -454,7 +491,7 @@ func otherOwners(r *workspace.Project, m Manifest) (map[string]bool, error) {
 }
 
 func hookScript(binary, name, backup string) string {
-	content := "#!/bin/sh\n# Managed by Motif; see motif-install.json\nstatus=0\n"
+	content := "#!/bin/sh\n" + hookBegin + "# https://github.com/yhlooo/motif\nstatus=0\n"
 	input := ""
 	if name == "post-rewrite" || name == "reference-transaction" {
 		content += "input=$(mktemp) || {\n"
@@ -468,7 +505,7 @@ func hookScript(binary, name, backup string) string {
 		content += "if [ -x " + quote(backup) + " ]; then\n  " + quote(backup) + " \"$@\"" + input + " || status=$?\nfi\n"
 	}
 	content += quote(binary) + " hook git " + name + " \"$@\"" + input + " || true\nexit \"$status\"\n"
-	return content
+	return content + hookEnd
 }
 
 // HasGitHook limits a shared hooksPath wrapper to projects that installed it.
@@ -479,7 +516,7 @@ func HasGitHook(ctx context.Context, dir, event string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	data, err := os.ReadFile(filepath.Join(strings.TrimSpace(string(raw)), "motif-install.json"))
+	data, err := readManifest(strings.TrimSpace(string(raw)))
 	if os.IsNotExist(err) {
 		return false, nil
 	}

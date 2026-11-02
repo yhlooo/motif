@@ -3,3 +3,8 @@ commands.CmdShortDesc: Intent-based code review for AI coding agents.
 commands.GlobalOptsVerbosityDesc: Number for the log level verbosity (0, 1, or 2)
 commands.VersionDesc: Print the version information
 commands.VersionOptsOutputFormatDesc: Output format. One of (json, yaml)
+integration.CodexInterruptStatus: Motif snapshot on interruption
+integration.CodexPostToolUseStatus: Motif snapshot after tool execution
+integration.CodexPreToolUseStatus: Motif snapshot before tool execution
+integration.CodexSessionEndStatus: Motif snapshot at session end
+integration.CodexStopStatus: Motif snapshot at turn end
