@@ -1,4 +1,4 @@
-package store
+package sqlite
 
 import "github.com/yhlooo/motif/internal/content"
 

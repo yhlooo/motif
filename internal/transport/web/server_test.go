@@ -47,7 +47,7 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	}
 	git("add", ".")
 	git("commit", "-m", "change")
-	s, e := store.Open(t.TempDir())
+	s, e := sqlite.Open(t.TempDir())
 	if e != nil {
 		t.Fatal(e)
 	}

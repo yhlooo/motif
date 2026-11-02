@@ -12,10 +12,9 @@
 │   ├── content               # 内容引用、对象库及生命周期锁
 │   ├── app                   # 采集、改写、审阅、集成及适配器装配
 │   ├── adapters              # gitrepo / sqlite
-│   └── transport             # cli / web
-├── pkg                     # 共享基础能力
-│   ├── i18n                  # 国际化
-│   └── version               # 版本信息展示
+│   ├── transport             # cli / web
+│   ├── i18n                  # 应用内国际化
+│   └── version               # 应用版本信息展示
 ├── scripts                 # 其它脚本工具
 ├── docs                    # 文档
 │   ├── development           # 开发文档

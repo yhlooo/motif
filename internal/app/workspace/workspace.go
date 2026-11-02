@@ -11,10 +11,10 @@ import (
 
 type Project struct {
 	*gitrepo.Repository
-	Store *store.Store
+	Store *sqlite.Store
 }
 
-func Open(ctx context.Context, dir string, s *store.Store) (*Project, error) {
+func Open(ctx context.Context, dir string, s *sqlite.Store) (*Project, error) {
 	r, e := gitrepo.Open(ctx, dir, content.Objects{Dir: s.Dir})
 	if e != nil {
 		return nil, e

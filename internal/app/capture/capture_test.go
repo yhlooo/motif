@@ -20,7 +20,7 @@ type fixture struct {
 	t         *testing.T
 	ctx       context.Context
 	dir, data string
-	s         *store.Store
+	s         *sqlite.Store
 	r         *workspace.Project
 	w         domain.Worktree
 }
@@ -36,7 +36,7 @@ func newFixture(t *testing.T) *fixture {
 	f.git("commit", "-m", "base")
 	f.git("switch", "-c", "feature")
 	var err error
-	f.s, err = store.Open(f.data)
+	f.s, err = sqlite.Open(f.data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestCaptureBatchStopAndPersistedView(t *testing.T) {
 	if e = f.s.Close(); e != nil {
 		t.Fatal(e)
 	}
-	f.s, e = store.Open(f.data)
+	f.s, e = sqlite.Open(f.data)
 	if e != nil {
 		t.Fatal(e)
 	}

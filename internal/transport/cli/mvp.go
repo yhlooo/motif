@@ -1,4 +1,4 @@
-package commands
+package cli
 
 import (
 	"bufio"
@@ -28,14 +28,14 @@ func dataDir() (string, error) {
 	h, e := os.UserHomeDir()
 	return filepath.Join(h, ".motif"), e
 }
-func openStore() (*store.Store, error) {
+func openStore() (*sqlite.Store, error) {
 	p, e := dataDir()
 	if e != nil {
 		return nil, e
 	}
-	return store.Open(p)
+	return sqlite.Open(p)
 }
-func openProject(cmd *cobra.Command) (*store.Store, *workspace.Project, domain.Worktree, error) {
+func openProject(cmd *cobra.Command) (*sqlite.Store, *workspace.Project, domain.Worktree, error) {
 	s, e := openStore()
 	if e != nil {
 		return nil, nil, domain.Worktree{}, e
@@ -310,7 +310,7 @@ func newUninstallCommand() *cobra.Command {
 		defer s.Close()
 		full := len(agents) == 0
 		roots := []string{r.Root}
-		var plan store.DeletionPlan
+		var plan sqlite.DeletionPlan
 		if full {
 			plan, err = s.DeletionPlan(w.RepositoryID)
 			if err != nil {

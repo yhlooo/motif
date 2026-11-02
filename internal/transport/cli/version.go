@@ -1,4 +1,4 @@
-package commands
+package cli
 
 import (
 	"encoding/json"
@@ -9,8 +9,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/yhlooo/motif/pkg/i18n"
-	"github.com/yhlooo/motif/pkg/version"
+	"github.com/yhlooo/motif/internal/i18n"
+	"github.com/yhlooo/motif/internal/version"
 )
 
 // VersionOptions version 子命令选项

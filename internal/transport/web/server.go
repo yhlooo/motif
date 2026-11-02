@@ -107,10 +107,10 @@ func send(w http.ResponseWriter, v any) {
 }
 func fail(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
-	if errors.Is(err, store.ErrStaleView) {
+	if errors.Is(err, sqlite.ErrStaleView) {
 		status = http.StatusConflict
 	}
-	if errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, sqlite.ErrNotFound) {
 		status = http.StatusNotFound
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -230,7 +230,7 @@ func (s *server) diff(w http.ResponseWriter, r *http.Request) {
 	if version := r.URL.Query().Get("view_version"); version != "" {
 		expected, e := strconv.ParseInt(version, 10, 64)
 		if e != nil || expected != cr.Version {
-			fail(w, store.ErrStaleView)
+			fail(w, sqlite.ErrStaleView)
 			return
 		}
 	}
@@ -261,7 +261,7 @@ func (s *server) decision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Version <= 0 || in.ExpectedRevision <= 0 {
-		fail(w, store.ErrStaleView)
+		fail(w, sqlite.ErrStaleView)
 		return
 	}
 	if err := s.service.Repo.Store.Decisions(r.Context(), s.rid(), r.PathValue("id"), []string{r.PathValue("item")}, in.Decision, in.Version, map[string]int64{r.PathValue("item"): in.ExpectedRevision}); err != nil {
@@ -279,7 +279,7 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 	if value := r.URL.Query().Get("view_version"); value != "" {
 		expected, e := strconv.ParseInt(value, 10, 64)
 		if e != nil || expected != cr.Version {
-			fail(w, store.ErrStaleView)
+			fail(w, sqlite.ErrStaleView)
 			return
 		}
 	}
@@ -346,7 +346,7 @@ func (s *server) thread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Version <= 0 || in.Version != cr.Version {
-		fail(w, store.ErrStaleView)
+		fail(w, sqlite.ErrStaleView)
 		return
 	}
 	cr, err = s.service.Repo.Store.LoadSelection(cr, in.First, in.Last, true)
@@ -370,7 +370,7 @@ func (s *server) reply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Version <= 0 {
-		fail(w, store.ErrStaleView)
+		fail(w, sqlite.ErrStaleView)
 		return
 	}
 	if strings.TrimSpace(in.Body) == "" {
@@ -411,7 +411,7 @@ func (s *server) patch(w http.ResponseWriter, r *http.Request) {
 		send(w, map[string]any{"event": e, "diff": d})
 		return
 	}
-	fail(w, store.ErrNotFound)
+	fail(w, sqlite.ErrNotFound)
 }
 
 func (s *server) decisions(w http.ResponseWriter, r *http.Request) {
@@ -425,7 +425,7 @@ func (s *server) decisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Version <= 0 || len(in.Revisions) != len(in.Items) {
-		fail(w, store.ErrStaleView)
+		fail(w, sqlite.ErrStaleView)
 		return
 	}
 	if err := s.service.Repo.Store.Decisions(r.Context(), s.rid(), r.PathValue("id"), in.Items, in.Decision, in.Version, in.Revisions); err != nil {

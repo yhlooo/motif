@@ -1,4 +1,4 @@
-package commands
+package cli
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/yhlooo/motif/pkg/i18n"
-	"github.com/yhlooo/motif/pkg/version"
+	"github.com/yhlooo/motif/internal/i18n"
+	"github.com/yhlooo/motif/internal/version"
 )
 
 // NewGlobalOptions 创建默认 GlobalOptions

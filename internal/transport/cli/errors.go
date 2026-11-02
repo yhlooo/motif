@@ -1,4 +1,4 @@
-package commands
+package cli
 
 import (
 	"errors"
@@ -13,7 +13,7 @@ func ExitCode(err error) int {
 		return 0
 	}
 	var usage *UsageError
-	if errors.As(err, &usage) || errors.Is(err, store.ErrInvalidArgument) {
+	if errors.As(err, &usage) || errors.Is(err, sqlite.ErrInvalidArgument) {
 		return 2
 	}
 	return 1

@@ -1,4 +1,4 @@
-package store
+package sqlite
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"github.com/yhlooo/motif/internal/content"
 	"github.com/yhlooo/motif/internal/domain"
-	change "github.com/yhlooo/motif/internal/domain/state"
+	"github.com/yhlooo/motif/internal/domain/state"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -38,15 +38,15 @@ func (s *Store) prepareIO(ctx context.Context, w string, states []domain.State) 
 		known[id] = n > 0
 		return n > 0
 	}
-	for _, state := range states {
-		if p.roots[state.Root()] {
+	for _, snapshotState := range states {
+		if p.roots[snapshotState.Root()] {
 			continue
 		}
-		e := state.Persist(owned, func(id string, data []byte) error {
+		e := snapshotState.Persist(owned, func(id string, data []byte) error {
 			if ownershipErr != nil {
 				return ownershipErr
 			}
-			var node change.NodeRecord
+			var node state.NodeRecord
 			if e := json.Unmarshal(data, &node); e != nil {
 				return e
 			}
@@ -76,7 +76,7 @@ func (s *Store) prepareIO(ctx context.Context, w string, states []domain.State) 
 		if ownershipErr != nil {
 			return nil, ownershipErr
 		}
-		p.roots[state.Root()] = true
+		p.roots[snapshotState.Root()] = true
 	}
 	return p, nil
 }

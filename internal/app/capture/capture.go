@@ -1,4 +1,4 @@
-// Package capture adapts hooks to the source-independent state/event store.
+// Package capture adapts hooks to the source-independent state/event sqlite.
 package capture
 
 import (
@@ -31,7 +31,7 @@ type CodexInput struct {
 
 func Observe(ctx context.Context, r *workspace.Project, w domain.Worktree, o domain.Observation) error {
 	c, err := r.Store.Cursor(w.ID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	if err != nil && !errors.Is(err, sqlite.ErrNotFound) {
 		return err
 	}
 	o.ExpectedVersion = c.Version
@@ -86,7 +86,7 @@ func Observe(ctx context.Context, r *workspace.Project, w domain.Worktree, o dom
 	}
 	return r.Store.Observe(ctx, o)
 }
-func Codex(ctx context.Context, s *store.Store, raw []byte) (map[string]string, error) {
+func Codex(ctx context.Context, s *sqlite.Store, raw []byte) (map[string]string, error) {
 	var input CodexInput
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return nil, err
@@ -181,10 +181,10 @@ func PatchList(events []domain.Event, turn string) string {
 	}
 	return b.String()
 }
-func Git(ctx context.Context, s *store.Store, dir, event string) error {
+func Git(ctx context.Context, s *sqlite.Store, dir, event string) error {
 	return GitNotification(ctx, s, dir, event, nil, strings.NewReader(""))
 }
-func GitNotification(ctx context.Context, s *store.Store, dir, event string, args []string, input io.Reader) error {
+func GitNotification(ctx context.Context, s *sqlite.Store, dir, event string, args []string, input io.Reader) error {
 	r, err := workspace.Open(ctx, dir, s)
 	if err != nil {
 		return err

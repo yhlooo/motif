@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	change "github.com/yhlooo/motif/internal/domain/state"
+	"github.com/yhlooo/motif/internal/domain/state"
 	"iter"
 	"time"
 )
@@ -20,16 +20,16 @@ func ID() string {
 func Now() int64 { return time.Now().UTC().UnixMicro() }
 
 // Shared state values are independent of persistence and transport.
-type File = change.File
-type State = change.State
+type File = state.File
+type State = state.State
 
-func ChangedPaths(a, b State) iter.Seq[string]          { return change.ChangedPaths(a, b) }
-func SameFile(a, b File) bool                           { return change.SameFile(a, b) }
-func From(m map[string]File) State                      { return change.From(m) }
-func DisplayPath(p string) string                       { return change.DisplayPath(p) }
-func Equal(a, b State) bool                             { return change.Equal(a, b) }
-func Clone(s State) State                               { return change.Clone(s) }
-func Apply(current, before, after State) (State, error) { return change.Apply(current, before, after) }
+func ChangedPaths(a, b State) iter.Seq[string]          { return state.ChangedPaths(a, b) }
+func SameFile(a, b File) bool                           { return state.SameFile(a, b) }
+func From(m map[string]File) State                      { return state.From(m) }
+func DisplayPath(p string) string                       { return state.DisplayPath(p) }
+func Equal(a, b State) bool                             { return state.Equal(a, b) }
+func Clone(s State) State                               { return state.Clone(s) }
+func Apply(current, before, after State) (State, error) { return state.Apply(current, before, after) }
 
 type Repository struct{ ID, CommonDir string }
 type Worktree struct{ ID, RepositoryID, Root, GitDir string }

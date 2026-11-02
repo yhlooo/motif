@@ -1,6 +1,6 @@
-1. 执行命令 `goi18n extract -format yaml -outdir pkg/i18n` 提取项目中需要翻译的消息结构体
-2. 执行命令 `goi18n merge -format yaml -outdir pkg/i18n pkg/i18n/active.*.yaml pkg/i18n/translate.*.yaml` 将新增需要翻译的内容合入到 `pkg/i18n/translate.{lang}.yaml` 文件中
-3. 将 `pkg/i18n/translate.{lang}.yaml` 中的每个消息从英文翻译为指定目标语言
+1. 执行命令 `goi18n extract -format yaml -outdir internal/i18n` 提取项目中需要翻译的消息结构体
+2. 执行命令 `goi18n merge -format yaml -outdir internal/i18n internal/i18n/active.*.yaml internal/i18n/translate.*.yaml` 将新增需要翻译的内容合入到 `internal/i18n/translate.{lang}.yaml` 文件中
+3. 将 `internal/i18n/translate.{lang}.yaml` 中的每个消息从英文翻译为指定目标语言
 
    目标语言由文件名决定， `translate.{lang}.yaml` 中 `{lang}` 表示语言，比如 `translate.zh.yaml` 表示目标语言是中文。
 
@@ -16,4 +16,4 @@
     - **description** (string) 描述信息，用于向译者提供与翻译相关的额外背景信息，以解释消息内容。
     - **hash** (string) 唯一标识此消息所翻译的原始消息的内容。（ **绝对不允许修改** ）
 
-4. 再次命令 `goi18n merge -format yaml -outdir pkg/i18n pkg/i18n/active.*.yaml pkg/i18n/translate.*.yaml` 将 `pkg/i18n/translate.{lang}.yaml` 中翻译好的内容合入到 `pkg/i18n/active.{lang}.yaml` 文件中
+4. 再次命令 `goi18n merge -format yaml -outdir internal/i18n internal/i18n/active.*.yaml internal/i18n/translate.*.yaml` 将 `internal/i18n/translate.{lang}.yaml` 中翻译好的内容合入到 `internal/i18n/active.{lang}.yaml` 文件中

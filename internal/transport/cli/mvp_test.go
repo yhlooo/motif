@@ -1,4 +1,4 @@
-package commands_test
+package cli_test
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ func TestHookStorageAndInputFailuresFailOpen(t *testing.T) {
 	for _, input := range []string{"not json", `{"hook_event_name":"Stop","cwd":"/nonexistent","session_id":"s","turn_id":"t"}`} {
 		t.Run(input, func(t *testing.T) {
 			t.Setenv("MOTIF_DATA_DIR", filepath.Join(t.TempDir(), "data"))
-			cmd := commands.NewCommand("motif")
+			cmd := cli.NewCommand("motif")
 			var out, diagnostic bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&diagnostic)
@@ -29,14 +29,14 @@ func TestHookStorageAndInputFailuresFailOpen(t *testing.T) {
 }
 func TestUsageErrorsHaveExitCodeTwo(t *testing.T) {
 	for _, args := range [][]string{{"patch", "get"}, {"install", "--agent", "unsupported"}, {"patch", "ls", "--format", "wrong"}, {"--verbose", "3"}, {"patch", "ls", "--unknown"}} {
-		cmd := commands.NewCommand("motif")
+		cmd := cli.NewCommand("motif")
 		cmd.SetArgs(args)
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
 		err := cmd.Execute()
-		if err == nil || commands.ExitCode(err) != 2 {
-			t.Fatalf("%v: %v (exit %d)", args, err, commands.ExitCode(err))
+		if err == nil || cli.ExitCode(err) != 2 {
+			t.Fatalf("%v: %v (exit %d)", args, err, cli.ExitCode(err))
 		}
 	}
 }

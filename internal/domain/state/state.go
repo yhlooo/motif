@@ -1,5 +1,5 @@
-// Package change defines immutable, structurally shared file states.
-package change
+// Package state defines immutable, structurally shared file states.
+package state
 
 import (
 	"crypto/sha256"

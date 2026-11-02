@@ -24,7 +24,7 @@ type fixture struct {
 	t       testing.TB
 	ctx     context.Context
 	dir     string
-	s       *store.Store
+	s       *sqlite.Store
 	r       *workspace.Project
 	w       domain.Worktree
 	service *review.Service
@@ -41,7 +41,7 @@ func setup(t testing.TB) *fixture {
 	f.git("commit", "-m", "base")
 	f.git("switch", "-c", "feature")
 	var err error
-	f.s, err = store.Open(t.TempDir())
+	f.s, err = sqlite.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestRefreshStableIdentitiesAndRebatch(t *testing.T) {
 	if next.Head != head || next.Version <= r.Version || next.Status != "in_review" || len(next.Items) != 2 || next.Items[0].ID != original.ID || next.Items[0].Decision != "approved" || next.Items[1].Decision != "pending" {
 		t.Fatalf("refresh failed: %+v", next)
 	}
-	if err := f.s.Decision(f.ctx, f.w.RepositoryID, r.ID, original.ID, "rejected", r.Version); !errors.Is(err, store.ErrStaleView) {
+	if err := f.s.Decision(f.ctx, f.w.RepositoryID, r.ID, original.ID, "rejected", r.Version); !errors.Is(err, sqlite.ErrStaleView) {
 		t.Fatal("stale approval accepted", err)
 	}
 	comments, err := f.service.MappedThreads(f.ctx, next, next.Items[0].ID, next.Items[1].ID)

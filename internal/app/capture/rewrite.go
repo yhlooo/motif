@@ -292,13 +292,13 @@ func References(ctx context.Context, r *workspace.Project, w domain.Worktree, ph
 		return fmt.Errorf("invalid reference transaction phase")
 	}
 	scanner := bufio.NewScanner(input)
-	updates := []store.RefTransition{}
+	updates := []sqlite.RefTransition{}
 	for scanner.Scan() {
 		f := strings.Fields(scanner.Text())
 		if len(f) != 3 {
 			return fmt.Errorf("invalid reference transaction")
 		}
-		updates = append(updates, store.RefTransition{Old: f[0], New: f[1], Ref: f[2]})
+		updates = append(updates, sqlite.RefTransition{Old: f[0], New: f[1], Ref: f[2]})
 	}
 	if err := scanner.Err(); err != nil {
 		return err

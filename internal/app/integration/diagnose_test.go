@@ -22,7 +22,7 @@ func TestDiagnoseReportsEffectiveHookTrust(t *testing.T) {
 	if _, err := cmd.CombinedOutput(); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.Open(t.TempDir())
+	s, err := sqlite.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

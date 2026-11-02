@@ -1,4 +1,4 @@
-package store
+package sqlite
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/yhlooo/motif/internal/content"
 	"github.com/yhlooo/motif/internal/domain"
-	change "github.com/yhlooo/motif/internal/domain/state"
+	"github.com/yhlooo/motif/internal/domain/state"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
@@ -179,8 +179,8 @@ func (s *Store) snapshot(id string) (domain.Snapshot, error) {
 	if len(s.nodes) > 100000 {
 		s.nodes = map[string]domain.State{}
 	}
-	state, e := change.Restore(row.Root, func(id string) ([]byte, error) { return s.Blob(id) }, s.nodes)
-	return domain.Snapshot{ID: row.ID, WorktreeID: row.WorktreeID, Base: row.Base, Trigger: row.Trigger, Time: row.ObservedAt, State: state}, e
+	restored, e := state.Restore(row.Root, func(id string) ([]byte, error) { return s.Blob(id) }, s.nodes)
+	return domain.Snapshot{ID: row.ID, WorktreeID: row.WorktreeID, Base: row.Base, Trigger: row.Trigger, Time: row.ObservedAt, State: restored}, e
 }
 func (s *Store) Snapshot(id string) (domain.Snapshot, error) {
 	release, e := s.lease(false)

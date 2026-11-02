@@ -222,14 +222,14 @@ func (s *Service) refresh(ctx context.Context, id string) (domain.Review, error)
 			}
 		}
 		next.ID, next.Created = previous.ID, previous.Created
-		if err = s.Repo.Store.PublishReview(ctx, s.Worktree, &next, previous.Version); errors.Is(err, store.ErrStaleView) {
+		if err = s.Repo.Store.PublishReview(ctx, s.Worktree, &next, previous.Version); errors.Is(err, sqlite.ErrStaleView) {
 			continue
 		} else if err != nil {
 			return previous, err
 		}
 		return next, nil
 	}
-	return domain.Review{}, store.ErrStaleView
+	return domain.Review{}, sqlite.ErrStaleView
 }
 
 func digest(v any) string { raw, _ := json.Marshal(v); return fmt.Sprintf("%x", sha256.Sum256(raw)) }

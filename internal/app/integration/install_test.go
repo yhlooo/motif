@@ -46,7 +46,7 @@ func TestInstallPreservesConfigurationAndExistingHooks(t *testing.T) {
 	if e := os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'motif called\\n'\nexit 1\n"), 0755); e != nil {
 		t.Fatal(e)
 	}
-	s, e := store.Open(t.TempDir())
+	s, e := sqlite.Open(t.TempDir())
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -101,7 +101,7 @@ func TestModifiedManagedConfigIsPreserved(t *testing.T) {
 	if _, e := c.CombinedOutput(); e != nil {
 		t.Fatal(e)
 	}
-	s, e := store.Open(t.TempDir())
+	s, e := sqlite.Open(t.TempDir())
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -148,7 +148,7 @@ func TestLinkedWorktreesShareHooksWithoutStacking(t *testing.T) {
 	git("commit", "--allow-empty", "-m", "base")
 	otherRoot := filepath.Join(t.TempDir(), "linked")
 	git("worktree", "add", "-b", "feature", otherRoot)
-	s, e := store.Open(t.TempDir())
+	s, e := sqlite.Open(t.TempDir())
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -211,7 +211,7 @@ func TestStreamingHooksPreserveArgumentsInputAndOriginalStatus(t *testing.T) {
 	if err := os.WriteFile(binary, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.Open(t.TempDir())
+	s, err := sqlite.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestExternalSharedHooksPathKeepsOtherProjectOwner(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.Open(t.TempDir())
+	s, err := sqlite.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

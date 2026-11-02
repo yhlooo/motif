@@ -16,7 +16,7 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - "-X github.com/yhlooo/motif/pkg/version.Version={{ .Version }}"
+      - "-X github.com/yhlooo/motif/internal/version.Version={{ .Version }}"
       - "-w"
 
 archives:

@@ -14,10 +14,10 @@ func main() {
 	ctx, cancel := NotifySignals(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	cmd := commands.NewCommand("motif")
+	cmd := cli.NewCommand("motif")
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		log.Print(err)
-		os.Exit(commands.ExitCode(err))
+		os.Exit(cli.ExitCode(err))
 	}
 }
 

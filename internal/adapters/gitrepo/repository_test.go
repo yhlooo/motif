@@ -48,7 +48,7 @@ func TestWorktreeActualBytesAndFileTypes(t *testing.T) {
 	git("add", "-f", "tracked")
 	git("add", ".")
 	git("commit", "-m", "base")
-	s, e := store.Open(t.TempDir())
+	s, e := sqlite.Open(t.TempDir())
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -163,7 +163,7 @@ func TestIgnoredPathScopeTransition(t *testing.T) {
 	}
 	git("add", ".")
 	git("commit", "-m", "base")
-	s, e := store.Open(t.TempDir())
+	s, e := sqlite.Open(t.TempDir())
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -236,7 +236,7 @@ func BenchmarkTreeRead(b *testing.B) {
 			}
 			git("add", ".")
 			git("commit", "-m", "base")
-			s, err := store.Open(b.TempDir())
+			s, err := sqlite.Open(b.TempDir())
 			if err != nil {
 				b.Fatal(err)
 			}
