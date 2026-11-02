@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -33,17 +34,56 @@ type Preview struct {
 func (s *Service) Preview(ctx context.Context, source, target string) (p Preview, err error) {
 	return s.resolve(ctx, source, target, false)
 }
+
+// CommitRange is independent of mutable branch names.
+type CommitRange struct{ SourceOID, TargetOID, ComparisonMode string }
+type BranchTracking struct{ Source, Target string }
+type RefreshError struct {
+	Code string
+	Err  error
+}
+
+func (e *RefreshError) Error() string { return e.Err.Error() }
+func (e *RefreshError) Unwrap() error { return e.Err }
+
+const projectionAlgorithm = "2"
+
+func inputSignature(source, target string, revision int64) string {
+	return digest([]any{source, target, "merge_base", revision, projectionAlgorithm})
+}
+
+// ResolveTracking resolves both endpoints before returning a candidate range.
+func (s *Service) ResolveTracking(ctx context.Context, t BranchTracking) (CommitRange, error) {
+	source, err := s.Repo.ResolveBranch(ctx, t.Source)
+	if err != nil {
+		return CommitRange{}, &RefreshError{"source_branch_missing", err}
+	}
+	target, err := s.Repo.ResolveBranch(ctx, t.Target)
+	if err != nil {
+		return CommitRange{}, &RefreshError{"target_branch_missing", err}
+	}
+	return CommitRange{source, target, "merge_base"}, nil
+}
 func (s *Service) resolve(ctx context.Context, source, target string, allowEmpty bool) (p Preview, err error) {
-	p.Source = source
-	p.Target = target
-	p.SourceOID, err = s.Repo.ResolveBranch(ctx, source)
+	r, err := s.ResolveTracking(ctx, BranchTracking{source, target})
 	if err != nil {
 		return p, err
 	}
-	p.TargetOID, err = s.Repo.ResolveBranch(ctx, target)
-	if err != nil {
-		return p, err
+	p, err = s.previewRange(ctx, r, allowEmpty)
+	p.Source, p.Target = source, target
+	return
+}
+func (s *Service) PreviewRange(ctx context.Context, r CommitRange) (Preview, error) {
+	return s.previewRange(ctx, r, false)
+}
+func (s *Service) previewRange(ctx context.Context, r CommitRange, allowEmpty bool) (p Preview, err error) {
+	if r.ComparisonMode != "" && r.ComparisonMode != "merge_base" {
+		return p, fmt.Errorf("unsupported comparison mode")
 	}
+	if !gitrepo.ValidOID(r.SourceOID) || !gitrepo.ValidOID(r.TargetOID) {
+		return p, fmt.Errorf("range requires full commit OIDs")
+	}
+	p.SourceOID, p.TargetOID = r.SourceOID, r.TargetOID
 	p.Head = p.SourceOID
 	raw, err := s.Repo.Git(ctx, "merge-base", "--all", p.SourceOID, p.TargetOID)
 	if err != nil {
@@ -80,7 +120,12 @@ func (s *Service) Create(ctx context.Context, p Preview, title string) (r store.
 	if strings.TrimSpace(title) == "" {
 		return r, fmt.Errorf("review title is required")
 	}
-	current, err := s.Preview(ctx, p.Source, p.Target)
+	var current Preview
+	if p.Source == "" && p.Target == "" {
+		current, err = s.PreviewRange(ctx, CommitRange{p.SourceOID, p.TargetOID, "merge_base"})
+	} else {
+		current, err = s.Preview(ctx, p.Source, p.Target)
+	}
 	if err != nil {
 		return r, err
 	}
@@ -95,42 +140,103 @@ func (s *Service) Create(ctx context.Context, p Preview, title string) (r store.
 	if len(r.Items) == 0 {
 		return r, fmt.Errorf("no code changes to review")
 	}
+	if p.Source != "" {
+		candidate, e := s.ResolveTracking(ctx, BranchTracking{p.Source, p.Target})
+		if e != nil {
+			return r, e
+		}
+		if candidate.SourceOID != p.SourceOID || candidate.TargetOID != p.TargetOID {
+			return r, fmt.Errorf("branches changed; preview the range again")
+		}
+	}
 	if err = s.Repo.Store.SaveReview(ctx, s.Worktree, &r); err != nil {
 		return r, err
 	}
 	return s.Repo.Store.Review(s.Worktree.RepositoryID, r.ID)
 }
+
+// Refresh changes the published range only after both references and projection succeed.
 func (s *Service) Refresh(ctx context.Context, id string) (store.Review, error) {
+	attempt, err := s.Repo.Store.BeginRefresh(ctx, s.Worktree.RepositoryID, id)
+	if err != nil {
+		return store.Review{}, err
+	}
+	result, refreshErr := s.refresh(ctx, id)
+	code, message := "ok", ""
+	if refreshErr != nil {
+		code = "build_failed"
+		message = refreshErr.Error()
+		var e *RefreshError
+		if errors.As(refreshErr, &e) {
+			code = e.Code
+		}
+	}
+	if err = s.Repo.Store.FinishRefresh(ctx, s.Worktree.RepositoryID, id, attempt, code, message); err != nil {
+		return result, err
+	}
+	if refreshErr != nil {
+		return result, refreshErr
+	}
+	return s.Repo.Store.ReviewSummary(s.Worktree.RepositoryID, id)
+}
+func (s *Service) refresh(ctx context.Context, id string) (store.Review, error) {
 	for attempt := 0; attempt < 3; attempt++ {
-		previous, err := s.Repo.Store.Review(s.Worktree.RepositoryID, id)
+		previous, err := s.Repo.Store.ReviewSummary(s.Worktree.RepositoryID, id)
 		if err != nil {
 			return previous, err
 		}
-		p, err := s.resolve(ctx, previous.Source, previous.Target, true)
+		source, target := previous.SourceOID, previous.TargetOID
+
+		if previous.Source != "" || previous.Target != "" {
+			candidate, e := s.ResolveTracking(ctx, BranchTracking{previous.Source, previous.Target})
+			if e != nil {
+				return previous, e
+			}
+			source, target = candidate.SourceOID, candidate.TargetOID
+		}
+		revision, err := s.Repo.Store.SourceRevision(ctx)
 		if err != nil {
 			return previous, err
 		}
+		if previous.InputSignature == inputSignature(source, target, revision) {
+			return previous, nil
+		}
+		p, err := s.previewRange(ctx, CommitRange{source, target, "merge_base"}, true)
+		if err != nil {
+			return previous, &RefreshError{"range_unresolvable", err}
+		}
+		p.Source, p.Target = previous.Source, previous.Target
 		next, err := s.build(ctx, p, previous.Title)
 		if err != nil {
-			return next, err
+			return previous, err
 		}
 		for _, item := range previous.Items {
 			if item.StableKey == "" && item.Kind == "batch" {
-				next.Warning += "旧版审阅未保存来源批次身份，无法可靠匹配；历史审批与评论保留，新视图批次需重新审阅。"
+				next.Warning += "旧版审阅未保存来源批次身份，历史审批与评论保留，新批次需重新审阅。"
 				break
 			}
 		}
-		next.ID = previous.ID
-		next.Created = previous.Created
-		if err = s.Repo.Store.PublishReview(ctx, s.Worktree, &next, previous.Version); err == store.ErrStaleView {
+
+		if previous.Source != "" {
+			current, e := s.ResolveTracking(ctx, BranchTracking{previous.Source, previous.Target})
+			if e != nil {
+				return previous, e
+			}
+			if current.SourceOID != source || current.TargetOID != target {
+				continue
+			}
+		}
+		next.ID, next.Created = previous.ID, previous.Created
+		if err = s.Repo.Store.PublishReview(ctx, s.Worktree, &next, previous.Version); errors.Is(err, store.ErrStaleView) {
 			continue
 		} else if err != nil {
-			return next, err
+			return previous, err
 		}
-		return s.Repo.Store.Review(s.Worktree.RepositoryID, id)
+		return next, nil
 	}
 	return store.Review{}, store.ErrStaleView
 }
+
 func digest(v any) string { raw, _ := json.Marshal(v); return fmt.Sprintf("%x", sha256.Sum256(raw)) }
 func deltaDigest(before, after store.State) string {
 	b, a := store.State{}, store.State{}
@@ -153,6 +259,11 @@ func (s *Service) build(ctx context.Context, p Preview, title string) (r store.R
 		return r, err
 	}
 	r.SourceRevision = revision
+	r.InputSignature = inputSignature(p.SourceOID, p.TargetOID, revision)
+	r.ComparisonMode = "merge_base"
+	r.Closure = "verified"
+	r.History = "complete"
+	r.Diagnostics = []store.Diagnostic{}
 	r.CheckSource = true
 	r.Warning = strings.Join(warnings, " ")
 	selected := map[string]bool{}
@@ -191,6 +302,10 @@ func (s *Service) build(ctx context.Context, p Preview, title string) (r store.R
 	}
 	for i := 0; i < len(events); {
 		e := events[i]
+		if e.Kind == "unknown" {
+			r.History = "partial"
+			r.Diagnostics = append(r.Diagnostics, store.Diagnostic{Code: "unknown_source", Stage: "history", EventID: e.ID, Message: "事件来源未知"})
+		}
 		j := i + 1
 		if e.BatchID != "" {
 			for j < len(events) && events[j].BatchID == e.BatchID {
@@ -225,6 +340,8 @@ func (s *Service) build(ctx context.Context, p Preview, title string) (r store.R
 				return r, e1
 			}
 			if len(conflicts) > 0 {
+				r.History = "partial"
+				r.Diagnostics = append(r.Diagnostics, store.Diagnostic{Code: "projection_conflict", Stage: "replay", EventID: event.ID, Paths: conflicts, Message: "部分修改无法准确投影"})
 				r.Warning += "无法准确投影的修改转为最终未知补齐：" + event.ID + " (" + strings.Join(conflicts, ", ") + ")。"
 				item.Description += "\n部分路径不能准确投影，见原始事件与最终未知补齐：" + strings.Join(conflicts, ", ")
 			}
@@ -247,12 +364,15 @@ func (s *Service) build(ctx context.Context, p Preview, title string) (r store.R
 	}
 	if !store.Equal(state, target) {
 		r.Integrity = "completed_with_unknown"
+		r.History = "partial"
+		r.Diagnostics = append(r.Diagnostics, store.Diagnostic{Code: "unknown_completion", Stage: "integrity", Message: "最终状态包含未归属的净变化"})
 		r.Items = append(r.Items, store.ReviewItem{StableKey: p.Head + "/integrity_unknown/" + deltaDigest(state, target), Commit: p.Head, Digest: deltaDigest(state, target), ID: store.ID(), Kind: "integrity_unknown", Title: "未知修改：最终差异补齐", Description: "Git 最终状态中没有被上述采集历史覆盖的净变化。", Decision: "pending", Before: store.Clone(state), After: target, Events: []string{}})
 		state = target
 	}
 	if len(p.Commits) == 0 && len(r.Items) == 0 {
 		r.Warning = "当前源/目标分支之间没有待审阅提交。"
 	} else if len(events) == 0 {
+		r.History = "unavailable"
 		r.Warning += "未采集到数据，可能未安装 hook 或 hook 运行失败"
 	} else {
 		r.Warning += "已有采集记录不代表中间过程完整；最终状态已经验证。"
@@ -267,7 +387,9 @@ func (s *Service) build(ctx context.Context, p Preview, title string) (r store.R
 	r.ViewDigest = digest(struct {
 		Source, Target, Base, Head string
 		Commits, Items             []string
-	}{p.SourceOID, p.TargetOID, p.Base, p.Head, p.Commits, identities})
+		History, Warning           string
+		Diagnostics                []store.Diagnostic
+	}{p.SourceOID, p.TargetOID, p.Base, p.Head, p.Commits, identities, r.History, r.Warning, r.Diagnostics})
 	return r, nil
 }
 

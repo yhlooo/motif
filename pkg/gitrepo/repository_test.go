@@ -3,9 +3,11 @@ package gitrepo_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/yhlooo/motif/pkg/gitrepo"
@@ -207,5 +209,71 @@ func TestIgnoredPathScopeTransition(t *testing.T) {
 	last, e := r.Worktree(ctx, base, third)
 	if e != nil || last["temporary"].OutOfScope || last["temporary"].Hash == "" {
 		t.Fatal("path re-entry lost", e)
+	}
+}
+
+func BenchmarkTreeRead(b *testing.B) {
+	for _, size := range []int{100, 1000} {
+		b.Run(strconv.Itoa(size), func(b *testing.B) {
+			ctx := context.Background()
+			root := b.TempDir()
+			git := func(args ...string) {
+				cmd := exec.Command("git", args...)
+				cmd.Dir = root
+				if raw, err := cmd.CombinedOutput(); err != nil {
+					b.Fatalf("%s: %v", raw, err)
+				}
+			}
+			git("init", "-b", "main")
+			git("config", "user.name", "Bench")
+			git("config", "user.email", "bench@example.com")
+			for i := 0; i < size; i++ {
+				if err := os.WriteFile(filepath.Join(root, strconv.Itoa(i)), []byte(fmt.Sprintf("file %d\n", i)), 0644); err != nil {
+					b.Fatal(err)
+				}
+			}
+			git("add", ".")
+			git("commit", "-m", "base")
+			s, err := store.Open(b.TempDir())
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer s.Close()
+			r, err := gitrepo.Open(ctx, root, s)
+			if err != nil {
+				b.Fatal(err)
+			}
+			head, err := r.Head(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Run("cold", func(b *testing.B) {
+				var calls int64
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					cold := &gitrepo.Repository{Root: root, CommonDir: r.CommonDir, Store: s}
+					state, err := cold.Tree(ctx, head)
+					if err != nil || len(state) != size {
+						b.Fatal(err)
+					}
+					calls += cold.ReadStats().GitCalls
+				}
+				b.ReportMetric(float64(calls)/float64(b.N), "git/op")
+			})
+			if _, err = r.Tree(ctx, head); err != nil {
+				b.Fatal(err)
+			}
+			b.Run("warm", func(b *testing.B) {
+				before := r.ReadStats()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					state, err := r.Tree(ctx, head)
+					if err != nil || len(state) != size {
+						b.Fatal(err)
+					}
+				}
+				b.ReportMetric(float64(r.ReadStats().GitCalls-before.GitCalls)/float64(b.N), "git/op")
+			})
+		})
 	}
 }

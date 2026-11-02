@@ -123,7 +123,7 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	if threads[0].Comments[0].Author != "Reviewer" {
 		t.Fatal("author metadata")
 	}
-	rec = call("POST", "/api/comment-threads/"+threads[0].ID+"/replies", map[string]string{"body": "reply"})
+	rec = call("POST", "/api/comment-threads/"+threads[0].ID+"/replies", map[string]any{"body": "reply", "view_version": cr.Version})
 	if rec.Code != 200 {
 		t.Fatal(rec.Body.String())
 	}
@@ -142,12 +142,21 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte(`"status":"approved"`)) {
 		t.Fatal("approve", rec.Body.String())
 	}
-	// A new branch commit must refresh the existing CR and reject stale writes.
+	// Reads keep the published range until an explicit refresh publishes a new version.
 	if e = os.WriteFile(path, []byte("new\nsecond\nthird\n"), 0644); e != nil {
 		t.Fatal(e)
 	}
 	git("add", ".")
 	git("commit", "-m", "advance source")
+	rec = call("GET", prefix, nil)
+	var published store.Review
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &published) != nil || published.Version != cr.Version {
+		t.Fatal("GET unexpectedly refreshed", rec.Body.String())
+	}
+	rec = call("POST", prefix+"/refresh", nil)
+	if rec.Code != 200 {
+		t.Fatal(rec.Body.String())
+	}
 	rec = call("PATCH", prefix+"/items/"+item+"/decision", map[string]any{"decision": "approved", "view_version": cr.Version})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("stale approval accepted: %d %s", rec.Code, rec.Body.String())
@@ -170,6 +179,33 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	rec = call("GET", "/", nil)
 	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte("Motif")) {
 		t.Fatal("embedded UI missing")
+	}
+
+	// Deleting both tracking branches only prevents updates, never reading or
+	// reviewing the last published commit range.
+	git("switch", "--detach")
+	git("branch", "-D", "feature", "main")
+	rec = call("POST", prefix+"/refresh", nil)
+	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte(`"updated":false`)) {
+		t.Fatal("missing branch", rec.Body.String())
+	}
+	for _, path := range []string{"/api/code-reviews", prefix, prefix + "/diff?first=" + refreshed.Items[0].ID + "&last=" + refreshed.Items[0].ID, prefix + "/threads"} {
+		rec = call("GET", path, nil)
+		if rec.Code != 200 {
+			t.Fatal("saved CR unavailable", path, rec.Body.String())
+		}
+	}
+	rec = call("PATCH", prefix+"/decisions", map[string]any{"items": []string{refreshed.Items[0].ID}, "decision": "approved", "view_version": refreshed.Version})
+	if rec.Code != 200 {
+		t.Fatal("cannot review saved range", rec.Body.String())
+	}
+	rec = call("POST", prefix+"/threads", map[string]any{"first": refreshed.Items[0].ID, "last": refreshed.Items[0].ID, "path": base64.StdEncoding.EncodeToString([]byte("a.go")), "side": "new", "start": 1, "end": 1, "body": "saved range comment", "view_version": refreshed.Version})
+	if rec.Code != 200 {
+		t.Fatal("cannot comment saved range", rec.Body.String())
+	}
+	rec = call("POST", "/api/comment-threads/"+threads[0].ID+"/replies", map[string]any{"body": "obsolete reply", "view_version": cr.Version})
+	if rec.Code != http.StatusConflict {
+		t.Fatal("stale reply accepted", rec.Body.String())
 	}
 	if e = s.DeleteRepository(ctx, w.RepositoryID); e != nil {
 		t.Fatal("project deletion with review/comment relations", e)

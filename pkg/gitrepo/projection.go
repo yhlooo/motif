@@ -139,7 +139,7 @@ var hunkPattern = regexp.MustCompile(`(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+)
 
 // MapLines returns only surviving, unchanged source lines. A deleted/replaced
 // line is never attached to a nearby similar line. The original anchor is kept.
-func MapLines(ctx context.Context, source, target []byte, start, end int) ([]int, error) {
+func mapLinesUncached(ctx context.Context, source, target []byte, start, end int) ([]int, error) {
 	if start < 1 || end < start {
 		return nil, fmt.Errorf("invalid line range")
 	}

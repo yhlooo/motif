@@ -2,15 +2,21 @@
 package gitrepo
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/yhlooo/motif/pkg/store"
 )
@@ -18,6 +24,13 @@ import (
 type Repository struct {
 	Root, GitDir, CommonDir string
 	Store                   *store.Store
+	treeMu                  sync.Mutex
+	trees                   map[string]store.State
+	treeEntries             int
+	treeLoads               atomic.Int64
+	gitCalls                atomic.Int64
+	blobBytes               atomic.Int64
+	diffCache               boundedCache
 }
 
 func run(ctx context.Context, dir string, args ...string) ([]byte, error) {
@@ -55,6 +68,7 @@ func Open(ctx context.Context, dir string, s *store.Store) (*Repository, error) 
 	return r, nil
 }
 func (r *Repository) Git(ctx context.Context, args ...string) ([]byte, error) {
+	r.gitCalls.Add(1)
 	return run(ctx, r.Root, args...)
 }
 func (r *Repository) Identity(ctx context.Context) (store.Worktree, error) {
@@ -98,12 +112,54 @@ func (r *Repository) Config(ctx context.Context, key string) string {
 	b, _ := r.Git(ctx, "config", "--get", key)
 	return strings.TrimSpace(string(b))
 }
+
+// ValidOID accepts full SHA-1 and SHA-256 object identifiers, never revisions.
+func ValidOID(oid string) bool {
+	if len(oid) != 40 && len(oid) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(oid)
+	return err == nil
+}
+
+type ReadStats struct{ GitCalls, TreeLoads, BlobBytes int64 }
+
+func (r *Repository) ReadStats() ReadStats {
+	return ReadStats{r.gitCalls.Load(), r.treeLoads.Load(), r.blobBytes.Load()}
+}
 func (r *Repository) Tree(ctx context.Context, oid string) (store.State, error) {
+	if oid != "" && !ValidOID(oid) {
+		return nil, fmt.Errorf("tree requires full object ID")
+	}
+	r.treeMu.Lock()
+	defer r.treeMu.Unlock()
+	if state, ok := r.trees[oid]; ok {
+		return store.Clone(state), nil
+	}
+	r.treeLoads.Add(1)
 	state := store.State{}
 	if oid == "" {
 		return state, nil
 	}
 	raw, err := r.Git(ctx, "ls-tree", "-rz", "--full-tree", oid)
+	if err != nil {
+		return nil, err
+	}
+	objects := []string{}
+	for _, entry := range bytes.Split(raw, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		header, path, ok := bytes.Cut(entry, []byte{'\t'})
+		fields := strings.Fields(string(header))
+		if !ok || len(fields) != 3 {
+			return nil, fmt.Errorf("invalid git tree record")
+		}
+		if !r.managedPath(string(path)) && fields[0] != "160000" {
+			objects = append(objects, fields[2])
+		}
+	}
+	contents, err := r.readBlobs(ctx, objects)
 	if err != nil {
 		return nil, err
 	}
@@ -123,14 +179,21 @@ func (r *Repository) Tree(ctx context.Context, oid string) (store.State, error) 
 		if f.Mode == "160000" {
 			f.OID = fields[2]
 		} else {
-			content, e := r.Git(ctx, "cat-file", "blob", fields[2])
-			if e != nil {
-				return nil, e
-			}
-			object := fields[2]
-			f.Hash = r.Store.RegisterGitBlob(content, r.CommonDir+"/"+object, func() ([]byte, error) { return r.Git(context.Background(), "cat-file", "blob", object) })
+			f.Hash = contents[fields[2]]
 		}
 		state[string(path)] = f
+	}
+	// Bound state caching by entries and tree count; callers receive independent maps.
+	if r.trees == nil {
+		r.trees = map[string]store.State{}
+	}
+	if r.treeEntries+len(state) > 100000 || len(r.trees) >= 16 {
+		r.trees = map[string]store.State{}
+		r.treeEntries = 0
+	}
+	if len(state) <= 100000 {
+		r.trees[oid] = store.Clone(state)
+		r.treeEntries += len(state)
 	}
 	return state, nil
 }
@@ -303,7 +366,7 @@ type FileDiff struct {
 	Patch      string      `json:"patch"`
 }
 
-func (r *Repository) Diff(ctx context.Context, before, after store.State) ([]FileDiff, error) {
+func (r *Repository) diffUncached(ctx context.Context, before, after store.State) ([]FileDiff, error) {
 	paths := map[string]bool{}
 	for p := range before {
 		paths[p] = true
@@ -428,4 +491,69 @@ func (r *Repository) managedPath(path string) bool {
 		}
 	}
 	return false
+}
+
+// readBlobs uses one Git process per tree instead of one process per path.
+func (r *Repository) readBlobs(ctx context.Context, objects []string) (map[string]string, error) {
+	result := map[string]string{}
+	if len(objects) == 0 {
+		return result, nil
+	}
+	var input strings.Builder
+	seen := map[string]bool{}
+	for _, oid := range objects {
+		if !seen[oid] {
+			input.WriteString(oid + "\n")
+			seen[oid] = true
+		}
+	}
+	cmd := exec.CommandContext(ctx, "git", "cat-file", "--batch")
+	cmd.Dir = r.Root
+	cmd.Stdin = strings.NewReader(input.String())
+	r.gitCalls.Add(1)
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err = cmd.Start(); err != nil {
+		return nil, err
+	}
+	waited := false
+	defer func() {
+		if !waited {
+			_ = pipe.Close()
+			_ = cmd.Wait()
+		}
+	}()
+	reader := bufio.NewReader(pipe)
+	for range seen {
+		header, e := reader.ReadString('\n')
+		if e != nil {
+			return nil, e
+		}
+		fields := strings.Fields(header)
+		if len(fields) != 3 || fields[1] != "blob" {
+			return nil, fmt.Errorf("missing Git blob: %s", strings.TrimSpace(header))
+		}
+		size, e := strconv.ParseInt(fields[2], 10, 64)
+		if e != nil || size < 0 {
+			return nil, fmt.Errorf("invalid blob size")
+		}
+		data := make([]byte, size)
+		if _, e = io.ReadFull(reader, data); e != nil {
+			return nil, e
+		}
+		if term, e := reader.ReadByte(); e != nil || term != '\n' {
+			return nil, fmt.Errorf("invalid cat-file framing")
+		}
+		object := fields[0]
+		result[object] = r.Store.RegisterGitBlob(data, r.CommonDir+"/"+object, func() ([]byte, error) { return r.Git(context.Background(), "cat-file", "blob", object) })
+		r.blobBytes.Add(size)
+	}
+	err = cmd.Wait()
+	waited = true
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }

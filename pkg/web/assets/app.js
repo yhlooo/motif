@@ -22,18 +22,24 @@ async function listReviews() {
   filtered.forEach(r => {
     const card = el('article', 'review-card'), info = el('div'); card.tabIndex = 0; card.setAttribute('role', 'button');
     info.append(el('h2', '', r.title), el('div', 'muted', `${r.source} → ${r.target} · ${date(r.created)}`));
+    info.append(el('div','muted', `范围 ${r.target_oid.slice(0,12)} → ${r.source_oid.slice(0,12)}`));
+    if(r.refresh && r.refresh.code && r.refresh.code !== 'ok') info.append(el('p','muted','上次更新失败，已保留原 commit 范围。'));
     const status = el('div'); status.append(badge(r.status), el('p', 'muted', `${r.items.filter(i => i.decision === 'approved').length} / ${r.items.length} 项已批准`));
     card.append(info, status); card.onclick = safe(() => openReview(r.id)); card.onkeydown = e => { if (e.key === 'Enter') card.click(); }; root.append(card);
   });
 }
 async function openReview(id) {
-  current = await api('code-reviews/' + id); first = last = anchor = 0; history.replaceState(null, '', '#review=' + id); renderReview(); await renderSelection();
+  let refreshError = null;
+  try { await api('code-reviews/' + id + '/refresh', 'POST'); } catch(e) { refreshError = e; }
+  current = await api('code-reviews/' + id); first = last = anchor = 0; history.replaceState(null, '', '#review=' + id); renderReview(); await renderSelection(); if(refreshError) error(refreshError);
 }
 function renderReview() {
   app.replaceChildren(); const top = el('section', 'review-top'), row = el('div', 'row');
   const back = el('a', '', '← 全部审查'); back.href = '/'; row.append(back, badge(current.status));
   row.append(button('刷新审查', () => openReview(current.id), 'secondary'));
-  top.append(row, el('h1', '', current.title), el('div', 'muted', `${current.source} → ${current.target} · ${current.commits.length} 个提交 · ${date(current.created)}`), el('p', '', current.warning));
+  if(current.refresh && current.refresh.code && current.refresh.code !== 'ok') top.append(el('p','description', `更新失败：${current.refresh.message}。以下内容及审阅操作针对已保存的 commit 范围。`));
+  const range = el('div','muted', `范围 ${current.target_oid.slice(0,12)} → ${current.source_oid.slice(0,12)}`); range.title = `${current.target_oid} → ${current.source_oid}`;
+  top.append(row, range, el('h1', '', current.title), el('div', 'muted', `${current.source} → ${current.target} · ${current.commits.length} 个提交 · ${date(current.created)}`), el('p', '', current.warning));
   const workspace = el('div', 'workspace'), sidebar = el('aside', 'sidebar'), content = el('section', 'content'); content.id = 'content';
   sidebar.append(el('p', '', '按意图审查 · Shift 点击连续选择'));
   current.items.forEach((item, index) => {
@@ -54,7 +60,7 @@ async function renderSelection() {
   for (const [decision, label, cls] of [['approved', '批准所选', ''], ['rejected', '要求修改', 'reject'], ['pending', '重置为待审查', 'secondary']]) {
     actions.append(button(label, async () => {
       const ids = current.items.slice(first, last + 1).map(i => i.id), id = current.id;
-      for (const item of ids) await api(`code-reviews/${id}/items/${item}/decision`, 'PATCH', { decision, view_version: current.view_version });
+      await api(`code-reviews/${id}/decisions`, 'PATCH', { items: ids, decision, view_version: current.view_version });
       current = await api('code-reviews/' + id); renderReview(); await renderSelection();
     }, cls));
   } root.append(actions);
@@ -105,7 +111,7 @@ function renderThreads(firstId, lastId) {
     const box = el('article', 'thread'); box.append(el('div', 'muted', `${thread.side === 'old' ? '旧' : '新'}侧第 ${(thread.mapped_ranges || [{start:thread.start,end:thread.end}]).map(r => `${r.start}–${r.end}`).join('、')} 行 · 内容 ${thread.hash.slice(0, 12)}`));
     thread.comments.forEach(c => { box.append(el('div', 'muted', `${c.author} · ${date(c.created)}`), el('p', '', c.body)); });
     const text = el('textarea'); text.placeholder = '回复这条评论…'; text.setAttribute('aria-label', '回复评论');
-    box.append(text, button('回复', async () => { if (!text.value.trim()) throw new Error('请输入回复内容'); await api(`comment-threads/${thread.id}/replies`, 'POST', { body: text.value }); await renderSelection(); })); root.append(box);
+    box.append(text, button('回复', async () => { if (!text.value.trim()) throw new Error('请输入回复内容'); await api(`comment-threads/${thread.id}/replies`, 'POST', { body: text.value, view_version: current.view_version }); await renderSelection(); })); root.append(box);
   }); $('#content').append(root);
 }
 $('#new-review').onclick = () => { preview = null; $('#preview').textContent = ''; $('#create-button').disabled = true; $('#create-dialog').showModal(); };

@@ -1,5 +1,7 @@
 package store
 
+import "encoding/json"
+
 // Persistence models keep database keys/constraints independent of API views.
 // Table and column names retain the original v1 schema for existing databases.
 type schemaMigration struct {
@@ -139,6 +141,15 @@ type receiptRecord struct {
 func (receiptRecord) TableName() string { return "hook_receipts" }
 
 type reviewRecord struct {
+	InputSignature                    string            `gorm:"not null;default:''"`
+	ComparisonMode                    string            `gorm:"not null;default:'merge_base'"`
+	History                           string            `gorm:"not null;default:'unavailable'"`
+	Diagnostics                       string            `gorm:"not null;default:'[]'"`
+	RefreshAttempt                    int64             `gorm:"not null;default:0"`
+	RefreshAttemptedAt                int64             `gorm:"not null;default:0"`
+	RefreshSuccessAt                  int64             `gorm:"not null;default:0"`
+	RefreshCode                       string            `gorm:"not null;default:''"`
+	RefreshMessage                    string            `gorm:"not null;default:''"`
 	SourceRevision                    int64             `gorm:"not null;default:0"`
 	ViewDigest                        string            `gorm:"not null;default:''"`
 	Version                           int64             `gorm:"not null;default:1"`
@@ -154,7 +165,13 @@ type reviewRecord struct {
 
 func (reviewRecord) TableName() string { return "code_reviews" }
 func (r reviewRecord) value() Review {
-	return Review{ViewDigest: r.ViewDigest, Version: r.Version, ID: r.ID, RepositoryID: r.RepositoryID, Title: r.Title, Source: r.Source, Target: r.Target, SourceOID: r.SourceOID, TargetOID: r.TargetOID, Base: r.Base, Head: r.Head, Created: r.Created, Integrity: r.Integrity, Warning: r.Warning}
+	var diagnostics []Diagnostic
+	_ = json.Unmarshal([]byte(r.Diagnostics), &diagnostics)
+	closure := ""
+	if r.Integrity == "verified" || r.Integrity == "completed_with_unknown" {
+		closure = "verified"
+	}
+	return Review{Closure: closure, InputSignature: r.InputSignature, SourceRevision: r.SourceRevision, ComparisonMode: r.ComparisonMode, History: r.History, Diagnostics: diagnostics, Refresh: RefreshState{Attempt: r.RefreshAttempt, AttemptedAt: r.RefreshAttemptedAt, LastSuccessAt: r.RefreshSuccessAt, Code: r.RefreshCode, Message: r.RefreshMessage}, ViewDigest: r.ViewDigest, Version: r.Version, ID: r.ID, RepositoryID: r.RepositoryID, Title: r.Title, Source: r.Source, Target: r.Target, SourceOID: r.SourceOID, TargetOID: r.TargetOID, Base: r.Base, Head: r.Head, Created: r.Created, Integrity: r.Integrity, Warning: r.Warning}
 }
 
 type reviewCommitRecord struct {

@@ -49,12 +49,16 @@ func appendEvent(tx *gorm.DB, w, segment, base, kind, turnID, callID, pair strin
 
 // Observe atomically publishes a prepared immutable state and advances the cursor.
 func (s *Store) Observe(ctx context.Context, o Observation) error {
-	return s.sourceUpdate(ctx, func(tx *gorm.DB) error { return s.observeTx(tx, o) })
+	prepared, err := s.prepareObservation(ctx, o, nil, nil, nil)
+	if err != nil {
+		return err
+	}
+	return s.sourceUpdate(prepared, func(tx *gorm.DB) error { return s.observeTx(tx, o) })
 }
 func (s *Store) observeTx(tx *gorm.DB, o Observation) error {
 	w := o.Worktree.ID
 	for _, state := range []State{o.State, o.BaseState, o.CommitState} {
-		if err := s.validateState(state); err != nil {
+		if err := s.validatePrepared(tx, state); err != nil {
 			return err
 		}
 	}
@@ -124,7 +128,7 @@ func (s *Store) observeTx(tx *gorm.DB, o Observation) error {
 	if err != nil {
 		return err
 	}
-	if err = s.validateState(before.State); err != nil {
+	if err = s.validatePrepared(tx, before.State); err != nil {
 		return err
 	}
 	active := c.ActiveCall

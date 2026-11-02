@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -20,11 +23,15 @@ import (
 var ErrNotFound = gorm.ErrRecordNotFound
 
 type Store struct {
-	mu          sync.RWMutex
-	baseReaders map[string]func(context.Context, string) (State, error)
-	gitBlobs    map[string]map[string]func() ([]byte, error)
-	db          *gorm.DB
-	Dir         string
+	transactionWork atomic.Int64
+	transactions    atomic.Int64
+	mu              sync.RWMutex
+	baseReaders     map[string]func(context.Context, string) (State, error)
+	gitBlobs        map[string]map[string]func() ([]byte, error)
+	gitContent      map[string][]byte
+	gitContentBytes int
+	db              *gorm.DB
+	Dir             string
 }
 
 func Open(dir string) (*Store, error) {
@@ -71,7 +78,7 @@ func (s *Store) migrate() error {
 		if err := s.db.Take(&version).Error; err != nil {
 			return err
 		}
-		if version.Version < 1 || version.Version > 6 {
+		if version.Version < 1 || version.Version > 7 {
 			return fmt.Errorf("unsupported database schema %d", version.Version)
 		}
 		for _, model := range models() {
@@ -89,7 +96,7 @@ func (s *Store) migrate() error {
 			}
 		}
 		if version.Version < 6 {
-			return s.db.Transaction(func(tx *gorm.DB) error {
+			err := s.db.Transaction(func(tx *gorm.DB) error {
 				for _, entry := range []struct {
 					model  any
 					fields []string
@@ -111,6 +118,22 @@ func (s *Store) migrate() error {
 				}
 				return tx.Model(&schemaMigration{}).Where("version = ?", version.Version).Update("version", 6).Error
 			})
+			if err != nil {
+				return err
+			}
+			return s.migrate()
+		}
+		if version.Version == 6 {
+			return s.db.Transaction(func(tx *gorm.DB) error {
+				for _, field := range []string{"InputSignature", "ComparisonMode", "History", "Diagnostics", "RefreshAttempt", "RefreshAttemptedAt", "RefreshSuccessAt", "RefreshCode", "RefreshMessage"} {
+					if !tx.Migrator().HasColumn(&reviewRecord{}, field) {
+						if err := tx.Migrator().AddColumn(&reviewRecord{}, field); err != nil {
+							return err
+						}
+					}
+				}
+				return tx.Model(&schemaMigration{}).Where("version = ?", 6).Update("version", 7).Error
+			})
 		}
 		return nil
 	}
@@ -118,7 +141,7 @@ func (s *Store) migrate() error {
 		if err := tx.AutoMigrate(models()...); err != nil {
 			return err
 		}
-		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&schemaMigration{Version: 6}).Error
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&schemaMigration{Version: 7}).Error
 	})
 }
 func (s *Store) Close() error {
@@ -129,14 +152,19 @@ func (s *Store) Close() error {
 	return pool.Close()
 }
 func (s *Store) update(ctx context.Context, fn func(*gorm.DB) error) error {
-	return s.db.WithContext(ctx).Transaction(fn)
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		start := time.Now()
+		s.transactions.Add(1)
+		defer func() { s.transactionWork.Add(time.Since(start).Nanoseconds()) }()
+		return fn(tx)
+	})
 }
 func (s *Store) sourceUpdate(ctx context.Context, fn func(*gorm.DB) error) error {
 	return s.update(ctx, func(tx *gorm.DB) error {
 		if err := fn(tx); err != nil {
 			return err
 		}
-		return tx.Model(&schemaMigration{}).Where("version = ?", 6).Update("generation", gorm.Expr("generation + ?", 1)).Error
+		return tx.Model(&schemaMigration{}).Where("version = ?", 7).Update("generation", gorm.Expr("generation + ?", 1)).Error
 	})
 }
 func (s *Store) blobPath(hash string) (string, error) {
@@ -197,6 +225,14 @@ func (s *Store) Blob(hash string) ([]byte, error) {
 	b, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		s.mu.RLock()
+		cached, ok := s.gitContent[hash]
+		s.mu.RUnlock()
+		if ok {
+			return bytes.Clone(cached), nil
+		}
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		s.mu.RLock()
 		sources := []func() ([]byte, error){}
 		for _, read := range s.gitBlobs[hash] {
 			sources = append(sources, read)
@@ -245,6 +281,11 @@ func (s *Store) Register(ctx context.Context, common, root, gitdir string) (w Wo
 	return
 }
 func (s *Store) snapshot(q *gorm.DB, id string) (Snapshot, error) {
+	if p, ok := q.Statement.Context.Value(preparedKey{}).(*preparedIO); ok {
+		if sn, exists := p.snapshots[id]; exists {
+			return sn, nil
+		}
+	}
 	var row snapshotRecord
 	if err := q.Where("id = ?", id).Take(&row).Error; err != nil {
 		return Snapshot{}, err
@@ -347,9 +388,29 @@ func (s *Store) RegisterGitBlob(data []byte, key string, read func() ([]byte, er
 		s.gitBlobs[hash] = map[string]func() ([]byte, error){}
 	}
 	s.gitBlobs[hash][key] = read
+	if len(data) <= 4<<20 {
+		if s.gitContent == nil {
+			s.gitContent = map[string][]byte{}
+		}
+		if _, ok := s.gitContent[hash]; !ok {
+			if s.gitContentBytes+len(data) > 32<<20 {
+				s.gitContent = map[string][]byte{}
+				s.gitContentBytes = 0
+			}
+			s.gitContent[hash] = bytes.Clone(data)
+			s.gitContentBytes += len(data)
+		}
+	}
 	return hash
 }
 func (s *Store) baseState(q *gorm.DB, w, oid string) (State, bool, error) {
+	if p, ok := q.Statement.Context.Value(preparedKey{}).(*preparedIO); ok {
+		base, exists := p.bases[baseKey(w, oid)]
+		if !exists {
+			return nil, false, fmt.Errorf("base was not prepared: %s", oid)
+		}
+		return base.state, base.sparse, nil
+	}
 	var worktree worktreeRecord
 	if err := q.Select("repository_id").Where("id = ?", w).Take(&worktree).Error; err != nil {
 		return nil, false, err
@@ -366,4 +427,10 @@ func (s *Store) baseState(q *gorm.DB, w, oid string) (State, bool, error) {
 	}
 	state, err := reader(q.Statement.Context, oid)
 	return state, true, err
+}
+
+// TransactionStats measures time spent executing transaction bodies, excluding
+// acquisition wait and commit. It is diagnostic, not a correctness threshold.
+func (s *Store) TransactionStats() (count, workNanos int64) {
+	return s.transactions.Load(), s.transactionWork.Load()
 }

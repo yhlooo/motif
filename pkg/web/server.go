@@ -36,9 +36,10 @@ func Handler(service *review.Service, host string) http.Handler {
 	s.mux.HandleFunc("POST /api/code-reviews/preview", s.preview)
 	s.mux.HandleFunc("POST /api/code-reviews", s.create)
 	s.mux.HandleFunc("GET /api/code-reviews/{id}", s.get)
-	s.mux.HandleFunc("POST /api/code-reviews/{id}/refresh", s.get)
+	s.mux.HandleFunc("POST /api/code-reviews/{id}/refresh", s.refresh)
 	s.mux.HandleFunc("GET /api/code-reviews/{id}/diff", s.diff)
 	s.mux.HandleFunc("PATCH /api/code-reviews/{id}/items/{item}/decision", s.decision)
+	s.mux.HandleFunc("PATCH /api/code-reviews/{id}/decisions", s.decisions)
 	s.mux.HandleFunc("GET /api/code-reviews/{id}/threads", s.threads)
 	s.mux.HandleFunc("POST /api/code-reviews/{id}/threads", s.thread)
 	s.mux.HandleFunc("POST /api/comment-threads/{id}/replies", s.reply)
@@ -145,13 +146,6 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	for i := range rs {
-		rs[i], err = s.service.Refresh(r.Context(), rs[i].ID)
-		if err != nil {
-			fail(w, err)
-			return
-		}
-	}
 	send(w, rs)
 }
 func (s *server) preview(w http.ResponseWriter, r *http.Request) {
@@ -177,6 +171,10 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
+	if in.Preview.Source == "" || in.Preview.Target == "" {
+		fail(w, fmt.Errorf("source and target branches are required"))
+		return
+	}
 	cr, err := s.service.Create(r.Context(), in.Preview, in.Title)
 	if err != nil {
 		fail(w, err)
@@ -185,15 +183,39 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	send(w, cr)
 }
 func (s *server) get(w http.ResponseWriter, r *http.Request) {
-	cr, err := s.service.Refresh(r.Context(), r.PathValue("id"))
+	cr, err := s.service.Repo.Store.ReviewSummary(s.rid(), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
 		return
 	}
 	send(w, cr)
 }
+func (s *server) refresh(w http.ResponseWriter, r *http.Request) {
+	_, err := s.service.Refresh(r.Context(), r.PathValue("id"))
+	if err != nil {
+		// Storage failures remain errors; only recorded tracking/build failures expose a fallback.
+		cr, e := s.service.Repo.Store.ReviewSummary(s.rid(), r.PathValue("id"))
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		var tracking *review.RefreshError
+		if !errors.As(err, &tracking) || cr.Refresh.Code == "" || cr.Refresh.Code == "ok" {
+			fail(w, err)
+			return
+		}
+		send(w, map[string]any{"updated": false, "published_version": cr.Version, "refresh": cr.Refresh})
+		return
+	}
+	cr, err := s.service.Repo.Store.ReviewSummary(s.rid(), r.PathValue("id"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	send(w, map[string]any{"updated": true, "published_version": cr.Version, "refresh": cr.Refresh})
+}
 func (s *server) diff(w http.ResponseWriter, r *http.Request) {
-	cr, err := s.service.Refresh(r.Context(), r.PathValue("id"))
+	cr, err := s.service.Repo.Store.Review(s.rid(), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
 		return
@@ -225,8 +247,8 @@ func (s *server) decision(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	if _, err := s.service.Refresh(r.Context(), r.PathValue("id")); err != nil {
-		fail(w, err)
+	if in.Version <= 0 {
+		fail(w, store.ErrStaleView)
 		return
 	}
 	if err := s.service.Repo.Store.Decision(r.Context(), s.rid(), r.PathValue("id"), r.PathValue("item"), in.Decision, in.Version); err != nil {
@@ -236,7 +258,7 @@ func (s *server) decision(w http.ResponseWriter, r *http.Request) {
 	s.get(w, r)
 }
 func (s *server) threads(w http.ResponseWriter, r *http.Request) {
-	cr, err := s.service.Refresh(r.Context(), r.PathValue("id"))
+	cr, err := s.service.Repo.Store.ReviewSummary(s.rid(), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
 		return
@@ -250,6 +272,11 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 	}
 	first, last := r.URL.Query().Get("first"), r.URL.Query().Get("last")
 	if first != "" || last != "" {
+		cr, err = s.service.Repo.Store.LoadReviewStates(cr)
+		if err != nil {
+			fail(w, err)
+			return
+		}
 		mapped, e := s.service.MappedThreads(r.Context(), cr, first, last)
 		if e != nil {
 			fail(w, e)
@@ -300,12 +327,12 @@ func (s *server) thread(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	cr, err := s.service.Refresh(r.Context(), r.PathValue("id"))
+	cr, err := s.service.Repo.Store.Review(s.rid(), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	if in.Version != cr.Version {
+	if in.Version <= 0 || in.Version != cr.Version {
 		fail(w, store.ErrStaleView)
 		return
 	}
@@ -318,16 +345,21 @@ func (s *server) thread(w http.ResponseWriter, r *http.Request) {
 }
 func (s *server) reply(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Body string `json:"body"`
+		Body    string `json:"body"`
+		Version int64  `json:"view_version"`
 	}
 	if !decode(w, r, &in) {
+		return
+	}
+	if in.Version <= 0 {
+		fail(w, store.ErrStaleView)
 		return
 	}
 	if strings.TrimSpace(in.Body) == "" {
 		fail(w, fmt.Errorf("reply body is required"))
 		return
 	}
-	if err := s.service.Repo.Store.Reply(r.Context(), s.rid(), r.PathValue("id"), in.Body, s.author(r)); err != nil {
+	if err := s.service.Repo.Store.Reply(r.Context(), s.rid(), r.PathValue("id"), in.Body, s.author(r), in.Version); err != nil {
 		fail(w, err)
 		return
 	}
@@ -362,4 +394,24 @@ func (s *server) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fail(w, store.ErrNotFound)
+}
+
+func (s *server) decisions(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Items    []string `json:"items"`
+		Decision string   `json:"decision"`
+		Version  int64    `json:"view_version"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.Version <= 0 {
+		fail(w, store.ErrStaleView)
+		return
+	}
+	if err := s.service.Repo.Store.Decisions(r.Context(), s.rid(), r.PathValue("id"), in.Items, in.Decision, in.Version); err != nil {
+		fail(w, err)
+		return
+	}
+	s.get(w, r)
 }

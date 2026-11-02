@@ -3,11 +3,10 @@ package store
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/yhlooo/motif/pkg/change"
 	"time"
-	"unicode/utf8"
 )
 
 func ID() string {
@@ -19,91 +18,14 @@ func ID() string {
 }
 func Now() int64 { return time.Now().UTC().UnixMicro() }
 
-type File struct {
-	OutOfScope bool   `json:"out_of_scope,omitempty"`
-	Mode       string `json:"mode"`
-	Hash       string `json:"hash,omitempty"`
-	OID        string `json:"oid,omitempty"`
-}
+// Aliases preserve the persisted/public format while domain values live independently.
+type File = change.File
+type State = change.State
 
-// State keys are raw Git path bytes. Its JSON encoding preserves non-UTF-8 paths.
-type State map[string]File
-
-func (s State) MarshalJSON() ([]byte, error) {
-	m := map[string]File{}
-	for p, f := range s {
-		m[base64.StdEncoding.EncodeToString([]byte(p))] = f
-	}
-	return json.Marshal(m)
-}
-func (s *State) UnmarshalJSON(b []byte) error {
-	var m map[string]File
-	if err := json.Unmarshal(b, &m); err != nil {
-		return err
-	}
-	*s = State{}
-	for p, f := range m {
-		raw, err := base64.StdEncoding.DecodeString(p)
-		if err != nil {
-			return err
-		}
-		(*s)[string(raw)] = f
-	}
-	return nil
-}
-func DisplayPath(p string) string {
-	if utf8.ValidString(p) {
-		return p
-	}
-	return fmt.Sprintf("%q", []byte(p))
-}
-func Equal(a, b State) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for p, f := range a {
-		if g, ok := b[p]; !ok || g != f {
-			return false
-		}
-	}
-	return true
-}
-func Clone(s State) State {
-	c := State{}
-	for p, f := range s {
-		c[p] = f
-	}
-	return c
-}
-
-// Apply uses exact file-state preconditions, rather than concatenating diff text.
-func Apply(current, before, after State) (State, error) {
-	out := Clone(current)
-	paths := map[string]bool{}
-	for p := range before {
-		paths[p] = true
-	}
-	for p := range after {
-		paths[p] = true
-	}
-	for p := range paths {
-		b, bok := before[p]
-		a, aok := after[p]
-		if bok == aok && b == a {
-			continue
-		}
-		c, cok := current[p]
-		if cok != bok || c != b {
-			return nil, fmt.Errorf("cannot replay path %s: recorded before state differs", DisplayPath(p))
-		}
-		if aok {
-			out[p] = a
-		} else {
-			delete(out, p)
-		}
-	}
-	return out, nil
-}
+func DisplayPath(p string) string                       { return change.DisplayPath(p) }
+func Equal(a, b State) bool                             { return change.Equal(a, b) }
+func Clone(s State) State                               { return change.Clone(s) }
+func Apply(current, before, after State) (State, error) { return change.Apply(current, before, after) }
 
 type Repository struct{ ID, CommonDir string }
 type Worktree struct{ ID, RepositoryID, Root, GitDir string }
@@ -179,7 +101,27 @@ type Observation struct {
 	ExpectedVersion         int64
 	Receipt, Digest         string
 }
+type RefreshState struct {
+	Attempt       int64  `json:"attempt"`
+	AttemptedAt   int64  `json:"attempted_at"`
+	LastSuccessAt int64  `json:"last_success_at"`
+	Code          string `json:"code"`
+	Message       string `json:"message,omitempty"`
+}
+type Diagnostic struct {
+	Code    string   `json:"code"`
+	Stage   string   `json:"stage"`
+	EventID string   `json:"event_id,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
+	Message string   `json:"message"`
+}
 type Review struct {
+	Closure        string       `json:"closure"`
+	InputSignature string       `json:"-"`
+	ComparisonMode string       `json:"comparison_mode"`
+	History        string       `json:"history"`
+	Diagnostics    []Diagnostic `json:"diagnostics"`
+	Refresh        RefreshState `json:"refresh"`
 	CheckSource    bool         `json:"-"`
 	SourceRevision int64        `json:"-"`
 	ViewDigest     string       `json:"-"`
@@ -201,18 +143,19 @@ type Review struct {
 	Items          []ReviewItem `json:"items"`
 }
 type ReviewItem struct {
-	StableKey   string   `json:"stable_key"`
-	Commit      string   `json:"commit_oid"`
-	SourceBatch string   `json:"source_batch_uid,omitempty"`
-	Digest      string   `json:"content_digest"`
-	ID          string   `json:"id"`
-	Kind        string   `json:"kind"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	Decision    string   `json:"decision"`
-	Events      []string `json:"events"`
-	Before      State    `json:"-"`
-	After       State    `json:"-"`
+	BeforeID, AfterID string   `json:"-"`
+	StableKey         string   `json:"stable_key"`
+	Commit            string   `json:"commit_oid"`
+	SourceBatch       string   `json:"source_batch_uid,omitempty"`
+	Digest            string   `json:"content_digest"`
+	ID                string   `json:"id"`
+	Kind              string   `json:"kind"`
+	Title             string   `json:"title"`
+	Description       string   `json:"description"`
+	Decision          string   `json:"decision"`
+	Events            []string `json:"events"`
+	Before            State    `json:"-"`
+	After             State    `json:"-"`
 }
 type Thread struct {
 	AnchorItem  string    `json:"anchor_item"`

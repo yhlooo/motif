@@ -342,3 +342,96 @@ func TestLegacyReviewRefreshOnlyAdoptsProvableIdentity(t *testing.T) {
 		})
 	}
 }
+
+// A base reader performs a second database read. With the single-connection pool
+// this times out if snapshot resolution accidentally runs inside a transaction.
+func TestSnapshotResolutionRunsOutsideTransactions(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	w, err := s.Register(ctx, "/prepared.git", "/prepared", "/prepared.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := s.PutBlob([]byte("content\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := State{"file": {Mode: "100644", Hash: hash}}
+	calls := 0
+	s.SetBaseReader("/prepared.git", func(ctx context.Context, oid string) (State, error) {
+		calls++
+		limited, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+		if _, err := s.SourceRevision(limited); err != nil {
+			return nil, fmt.Errorf("base IO held database connection: %w", err)
+		}
+		if oid == "new" {
+			return state, nil
+		}
+		return State{}, nil
+	})
+	o := Observation{Worktree: w, Base: "base", BaseState: State{}, State: state, Trigger: "Stop"}
+	if err = s.Observe(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	cr := Review{ID: ID(), Base: "base", Head: "new", Items: []ReviewItem{{ID: ID(), Kind: "integrity_unknown", Before: State{}, After: state}}}
+	if err = s.SaveReview(ctx, w, &cr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Review(w.RepositoryID, cr.ID); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.Cursor(w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := Observation{Worktree: w, Base: "new", BaseState: state, State: state, Trigger: "rewrite_resume", Reset: true, ExpectedVersion: c.Version}
+	if err = s.SaveRewrite(ctx, w, "rebase", []RewriteMapping{{Old: "old", New: "new"}}, []CommitProjection{{Parent: "base", Commit: "new", Changes: []ProjectedChange{{Kind: "unknown", Before: State{}, After: state}}}}, nil, c.Version, resume); err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 {
+		t.Fatal("base reader was not exercised")
+	}
+}
+
+func TestRefreshAttemptsAndAtomicDecisions(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	w, err := s.Register(ctx, "/attempt.git", "/attempt", "/attempt.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr := Review{ID: ID(), Items: []ReviewItem{{ID: ID(), Before: State{}, After: State{}}, {ID: ID(), Before: State{}, After: State{}}}}
+	if err = s.SaveReview(ctx, w, &cr); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.BeginRefresh(ctx, w.RepositoryID, cr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.BeginRefresh(ctx, w.RepositoryID, cr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.FinishRefresh(ctx, w.RepositoryID, cr.ID, second, "ok", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.FinishRefresh(ctx, w.RepositoryID, cr.ID, first, "build_failed", "late failure"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Decisions(ctx, w.RepositoryID, cr.ID, []string{cr.Items[0].ID, "missing"}, "approved", cr.Version); err == nil {
+		t.Fatal("invalid selection accepted")
+	}
+	saved, err := s.ReviewSummary(w.RepositoryID, cr.ID)
+	if err != nil || saved.Refresh.Code != "ok" || saved.Items[0].Decision != "pending" {
+		t.Fatal("late attempt or partial decision corrupted state", saved, err)
+	}
+}

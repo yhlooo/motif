@@ -5,9 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -18,7 +20,7 @@ import (
 )
 
 type fixture struct {
-	t       *testing.T
+	t       testing.TB
 	ctx     context.Context
 	dir     string
 	s       *store.Store
@@ -27,7 +29,7 @@ type fixture struct {
 	service *review.Service
 }
 
-func setup(t *testing.T) *fixture {
+func setup(t testing.TB) *fixture {
 	t.Helper()
 	f := &fixture{t: t, ctx: context.Background(), dir: t.TempDir()}
 	f.git("init", "-b", "main")
@@ -126,7 +128,11 @@ func (f *fixture) create() store.Review {
 }
 func (f *fixture) refresh(id string) store.Review {
 	f.t.Helper()
-	r, err := f.service.Refresh(f.ctx, id)
+	_, err := f.service.Refresh(f.ctx, id)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	r, err := f.s.Review(f.w.RepositoryID, id)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -529,5 +535,119 @@ func TestMergeOnlyRangeStillReviewsFinalChanges(t *testing.T) {
 	}
 	if len(r.Items) != 1 || r.Items[0].Kind != "integrity_unknown" || r.Status != "in_review" {
 		t.Fatal("merge-only delta was lost", r)
+	}
+}
+
+func TestCommitRangeSurvivesDeletedTrackingBranches(t *testing.T) {
+	for _, branch := range []string{"feature", "main"} {
+		t.Run(branch, func(t *testing.T) {
+			f := setup(t)
+			f.edit("edit", "file.txt", "zero\nnew\n")
+			f.commit()
+			cr := f.create()
+			if err := f.s.Decision(f.ctx, f.w.RepositoryID, cr.ID, cr.Items[0].ID, "approved", cr.Version); err != nil {
+				t.Fatal(err)
+			}
+			thread := store.Thread{First: cr.Items[0].ID, Last: cr.Items[0].ID, Path: base64.StdEncoding.EncodeToString([]byte("file.txt")), Side: "new", Start: 2, End: 2}
+			if err := f.service.AddThread(f.ctx, cr, thread, "saved", "Reviewer"); err != nil {
+				t.Fatal(err)
+			}
+			f.git("switch", "--detach")
+			f.git("branch", "-D", branch)
+			// A movable surviving branch must not update only half the saved range.
+			if branch == "main" {
+				f.git("branch", "-f", "feature", cr.TargetOID)
+			}
+			if _, err := f.service.Refresh(f.ctx, cr.ID); err == nil {
+				t.Fatal("missing branch update succeeded")
+			}
+			saved, err := f.s.Review(f.w.RepositoryID, cr.ID)
+			if err != nil || saved.SourceOID != cr.SourceOID || saved.TargetOID != cr.TargetOID || saved.Version != cr.Version || saved.Status != "approved" || saved.Items[0].ID != cr.Items[0].ID {
+				t.Fatalf("published review changed: %+v %v", saved, err)
+			}
+			comments, err := f.service.MappedThreads(f.ctx, saved, saved.Items[0].ID, saved.Items[0].ID)
+			if err != nil || len(comments) != 1 {
+				t.Fatal("saved comments unavailable", err)
+			}
+			p, err := f.service.PreviewRange(f.ctx, review.CommitRange{SourceOID: cr.SourceOID, TargetOID: cr.TargetOID})
+			if err != nil || p.Head != cr.Head || len(p.Commits) != 1 {
+				t.Fatal("commit range depends on branch", err)
+			}
+			fixed, err := f.service.Create(f.ctx, p, "fixed commits")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = f.service.Refresh(f.ctx, fixed.ID); err != nil {
+				t.Fatal("fixed CR refresh", err)
+			}
+			f.git("branch", branch, map[string]string{"feature": cr.SourceOID, "main": cr.TargetOID}[branch])
+			if branch == "main" {
+				f.git("branch", "-f", "feature", cr.SourceOID)
+			}
+			restored := f.refresh(cr.ID)
+			if restored.Version != cr.Version || restored.Items[0].Decision != "approved" || restored.Refresh.Code != "ok" {
+				t.Fatal("branch restoration changed identity", restored)
+			}
+		})
+	}
+}
+
+func TestUnchangedRefreshSkipsProjectionIO(t *testing.T) {
+	f := setup(t)
+	f.edit("edit", "file.txt", "new\n")
+	f.commit()
+	cr := f.create()
+	// The fast path must not call the base reader, restore item snapshots, or build.
+	f.s.SetBaseReader(f.r.CommonDir, func(context.Context, string) (store.State, error) { return nil, errors.New("unexpected projection IO") })
+	if _, err := f.service.Refresh(f.ctx, cr.ID); err != nil {
+		t.Fatal("unchanged refresh performed IO", err)
+	}
+	saved, err := f.s.ReviewSummary(f.w.RepositoryID, cr.ID)
+	if err != nil || saved.Version != cr.Version || saved.Refresh.Code != "ok" {
+		t.Fatal("unchanged input was rebuilt", saved.Refresh, err)
+	}
+}
+
+func BenchmarkReviewRefresh(b *testing.B) {
+	for _, count := range []int{1, 10, 50} {
+		b.Run(strconv.Itoa(count), func(b *testing.B) {
+			f := setup(b)
+			batches := []store.Batch{}
+			for i := 0; i < count; i++ {
+				batches = append(batches, f.edit(fmt.Sprintf("batch-%d", i), fmt.Sprintf("file-%d", i), "new\n"))
+			}
+			f.commit()
+			cr := f.create()
+			b.Run("unchanged", func(b *testing.B) {
+				before := f.r.ReadStats()
+				_, work := f.s.TransactionStats()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if _, err := f.service.Refresh(f.ctx, cr.ID); err != nil {
+						b.Fatal(err)
+					}
+				}
+				b.ReportMetric(float64(f.r.ReadStats().TreeLoads-before.TreeLoads)/float64(b.N), "trees/op")
+				_, afterWork := f.s.TransactionStats()
+				b.ReportMetric(float64(afterWork-work)/float64(b.N), "txbody-ns/op")
+			})
+			b.Run("rebatch", func(b *testing.B) {
+				batch := batches[0]
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if err := f.s.DeleteBatch(f.ctx, f.w.ID, batch.ID); err != nil {
+						b.Fatal(err)
+					}
+					var err error
+					batch, err = f.s.CreateBatch(f.ctx, f.w.ID, batch.Title, batch.Description, batch.Members)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if _, err = f.service.Refresh(f.ctx, cr.ID); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		})
 	}
 }

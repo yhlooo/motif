@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 
@@ -17,7 +18,24 @@ func (s *Store) SaveReview(ctx context.Context, w Worktree, r *Review) error {
 // PublishReview replaces only the active projection. Historical identities,
 // decisions, original comment anchors and inactive items remain intact.
 func (s *Store) PublishReview(ctx context.Context, w Worktree, r *Review, expected int64) error {
-	return s.update(ctx, func(tx *gorm.DB) error {
+	ids := []string{}
+	states := []State{}
+	// Legacy matching uses immutable saved snapshots, loaded outside the transaction.
+	var oldItems []reviewItemRecord
+	if err := s.db.Where("review_id = ? AND stable_key = ?", r.ID, "").Find(&oldItems).Error; err != nil {
+		return err
+	}
+	for _, item := range oldItems {
+		ids = append(ids, item.BeforeID, item.AfterID)
+	}
+	for _, item := range r.Items {
+		states = append(states, item.Before, item.After)
+	}
+	prepared, err := s.prepareIO(ctx, w.ID, []string{r.Base, r.Head}, ids, states)
+	if err != nil {
+		return err
+	}
+	return s.update(prepared, func(tx *gorm.DB) error {
 		if r.CheckSource {
 			var revision schemaMigration
 			if err := tx.Take(&revision).Error; err != nil {
@@ -40,16 +58,17 @@ func (s *Store) PublishReview(ctx context.Context, w Worktree, r *Review, expect
 		}
 		if expected > 0 && old.ViewDigest == r.ViewDigest {
 			r.Version = old.Version
-			return nil
+			return tx.Model(&reviewRecord{}).Where("id = ?", r.ID).Updates(map[string]any{"source_revision": r.SourceRevision, "input_signature": r.InputSignature}).Error
 		}
 		r.Version = expected + 1
-		row := reviewRecord{SourceRevision: r.SourceRevision, ID: r.ID, RepositoryID: w.RepositoryID, Title: r.Title, Source: r.Source, Target: r.Target, SourceOID: r.SourceOID, TargetOID: r.TargetOID, Base: r.Base, Head: r.Head, Created: r.Created, Integrity: r.Integrity, Warning: r.Warning, Version: r.Version, ViewDigest: r.ViewDigest}
+		diagnostics, _ := json.Marshal(r.Diagnostics)
+		row := reviewRecord{InputSignature: r.InputSignature, ComparisonMode: r.ComparisonMode, History: r.History, Diagnostics: string(diagnostics), SourceRevision: r.SourceRevision, ID: r.ID, RepositoryID: w.RepositoryID, Title: r.Title, Source: r.Source, Target: r.Target, SourceOID: r.SourceOID, TargetOID: r.TargetOID, Base: r.Base, Head: r.Head, Created: r.Created, Integrity: r.Integrity, Warning: r.Warning, Version: r.Version, ViewDigest: r.ViewDigest}
 		if expected == 0 {
 			if err = tx.Create(&row).Error; err != nil {
 				return err
 			}
 		} else {
-			if err = tx.Model(&reviewRecord{}).Where("id = ? AND version = ?", r.ID, expected).Select("source_oid", "target_oid", "base", "head", "integrity", "warning", "version", "view_digest", "source_revision").Updates(&row).Error; err != nil {
+			if err = tx.Model(&reviewRecord{}).Where("id = ? AND version = ?", r.ID, expected).Select("input_signature", "comparison_mode", "history", "diagnostics", "source_oid", "target_oid", "base", "head", "integrity", "warning", "version", "view_digest", "source_revision").Updates(&row).Error; err != nil {
 				return err
 			}
 		}
@@ -100,10 +119,10 @@ func (s *Store) PublishReview(ctx context.Context, w Worktree, r *Review, expect
 		}
 		for i := range r.Items {
 			item := &r.Items[i]
-			if err = s.validateState(item.Before); err != nil {
+			if err = s.validatePrepared(tx, item.Before); err != nil {
 				return err
 			}
-			if err = s.validateState(item.After); err != nil {
+			if err = s.validatePrepared(tx, item.After); err != nil {
 				return err
 			}
 			if previous, ok := byKey[item.StableKey]; ok {
@@ -186,7 +205,7 @@ func (s *Store) Reviews(rid string) ([]Review, error) {
 	}
 	out := make([]Review, 0, len(ids))
 	for _, id := range ids {
-		r, err := s.Review(rid, id)
+		r, err := s.ReviewSummary(rid, id)
 		if err != nil {
 			return nil, err
 		}
@@ -197,9 +216,33 @@ func (s *Store) Reviews(rid string) ([]Review, error) {
 	}
 	return out, nil
 }
-func (s *Store) Review(rid, id string) (result Review, err error) {
-	err = s.db.Transaction(func(tx *gorm.DB) error { var e error; result, e = s.readReview(tx, rid, id); return e })
+func (s *Store) ReviewSummary(rid, id string) (result Review, err error) {
+	err = s.update(context.Background(), func(tx *gorm.DB) error { var e error; result, e = s.readReview(tx, rid, id); return e })
 	return
+}
+func (s *Store) Review(rid, id string) (result Review, err error) {
+	result, err = s.ReviewSummary(rid, id)
+	if err != nil {
+		return
+	}
+	return s.LoadReviewStates(result)
+}
+
+// LoadReviewStates resolves immutable snapshot references after the DB read ends.
+func (s *Store) LoadReviewStates(result Review) (Review, error) {
+	for i := range result.Items {
+		item := &result.Items[i]
+		b, e := s.Snapshot(item.BeforeID)
+		if e != nil {
+			return result, e
+		}
+		a, e := s.Snapshot(item.AfterID)
+		if e != nil {
+			return result, e
+		}
+		item.Before, item.After = b.State, a.State
+	}
+	return result, nil
 }
 func (s *Store) readReview(q *gorm.DB, rid, id string) (Review, error) {
 	var row reviewRecord
@@ -220,25 +263,25 @@ func (s *Store) readReview(q *gorm.DB, rid, id string) (Review, error) {
 	if len(records) == 0 {
 		r.Status = "in_review"
 	}
+	ids := make([]string, 0, len(records))
+	for _, record := range records {
+		ids = append(ids, record.ID)
+	}
+	members := []reviewEventRecord{}
+	if len(ids) > 0 {
+		if err := q.Where("item_id IN ?", ids).Order("item_id, position").Find(&members).Error; err != nil {
+			return r, err
+		}
+	}
+	eventsByItem := map[string][]string{}
+	for _, member := range members {
+		eventsByItem[member.ItemID] = append(eventsByItem[member.ItemID], member.EventID)
+	}
 	pending, rejected := false, false
 	for _, record := range records {
-		before, err := s.snapshot(q, record.BeforeID)
-		if err != nil {
-			return r, err
-		}
-		after, err := s.snapshot(q, record.AfterID)
-		if err != nil {
-			return r, err
-		}
-		if err = s.validateState(before.State); err != nil {
-			return r, err
-		}
-		if err = s.validateState(after.State); err != nil {
-			return r, err
-		}
-		item := ReviewItem{StableKey: record.StableKey, Commit: record.Commit, SourceBatch: record.SourceBatch, Digest: record.Digest, ID: record.ID, Kind: record.Kind, Title: record.Title, Description: record.Description, Decision: record.Decision, Before: before.State, After: after.State, Events: []string{}}
-		if err = q.Model(&reviewEventRecord{}).Where("item_id = ?", record.ID).Order("position").Pluck("event_id", &item.Events).Error; err != nil {
-			return r, err
+		item := ReviewItem{BeforeID: record.BeforeID, AfterID: record.AfterID, StableKey: record.StableKey, Commit: record.Commit, SourceBatch: record.SourceBatch, Digest: record.Digest, ID: record.ID, Kind: record.Kind, Title: record.Title, Description: record.Description, Decision: record.Decision, Events: []string{}}
+		if events := eventsByItem[record.ID]; events != nil {
+			item.Events = events
 		}
 		pending = pending || item.Decision == "pending"
 		rejected = rejected || item.Decision == "rejected"
@@ -331,12 +374,34 @@ func (s *Store) AddThread(ctx context.Context, rid string, t Thread, body, autho
 		return tx.Create(&commentRecord{ID: ID(), ThreadID: t.ID, Body: body, Author: author, Created: Now()}).Error
 	})
 }
-func (s *Store) Reply(ctx context.Context, rid, thread, body, author string) error {
+func (s *Store) Reply(ctx context.Context, rid, thread, body, author string, versions ...int64) error {
 	return s.update(ctx, func(tx *gorm.DB) error {
 		scope := tx.Model(&reviewRecord{}).Select("id").Where("repository_id = ?", rid)
 		var row threadRecord
-		if err := tx.Select("id").Where("id = ? AND review_id IN (?)", thread, scope).Take(&row).Error; err != nil {
+		if err := tx.Select("id", "review_id", "anchor_item", "first_item", "last_item", "side").Where("id = ? AND review_id IN (?)", thread, scope).Take(&row).Error; err != nil {
 			return err
+		}
+		if len(versions) > 0 {
+			var cr reviewRecord
+			if err := tx.Where("id = ?", row.ReviewID).Take(&cr).Error; err != nil {
+				return err
+			}
+			if versions[0] <= 0 || versions[0] != cr.Version {
+				return ErrStaleView
+			}
+			if row.AnchorItem == "" {
+				row.AnchorItem = row.LastItem
+				if row.Side == "old" {
+					row.AnchorItem = row.FirstItem
+				}
+			}
+			var active int64
+			if err := tx.Model(&reviewItemRecord{}).Where("id = ? AND review_id = ? AND active = ?", row.AnchorItem, cr.ID, true).Count(&active).Error; err != nil {
+				return err
+			}
+			if active == 0 {
+				return ErrStaleView
+			}
 		}
 		return tx.Create(&commentRecord{ID: ID(), ThreadID: thread, Body: body, Author: author, Created: Now()}).Error
 	})
@@ -345,7 +410,7 @@ func (s *Store) Reply(ctx context.Context, rid, thread, body, author string) err
 // ReviewInputs reads one committed source revision, including cross-worktree
 // batch membership and rewrite projections. Publish refuses a stale revision.
 func (s *Store) ReviewInputs(ctx context.Context, rid string, commits []string) (result []Event, projected map[string]bool, warnings []string, revision int64, err error) {
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = s.update(ctx, func(tx *gorm.DB) error {
 		var v schemaMigration
 		if e := tx.Take(&v).Error; e != nil {
 			return e
@@ -382,4 +447,57 @@ func (s *Store) ReviewInputs(ctx context.Context, rid string, commits []string) 
 		return nil
 	})
 	return
+}
+
+func (s *Store) SourceRevision(ctx context.Context) (int64, error) {
+	var v schemaMigration
+	err := s.db.WithContext(ctx).Take(&v).Error
+	return v.Generation, err
+}
+func (s *Store) BeginRefresh(ctx context.Context, rid, id string) (attempt int64, err error) {
+	err = s.update(ctx, func(tx *gorm.DB) error {
+		var row reviewRecord
+		if e := tx.Where("repository_id = ? AND id = ?", rid, id).Take(&row).Error; e != nil {
+			return e
+		}
+		attempt = row.RefreshAttempt + 1
+		return tx.Model(&row).Updates(map[string]any{"refresh_attempt": attempt, "refresh_attempted_at": Now()}).Error
+	})
+	return
+}
+func (s *Store) FinishRefresh(ctx context.Context, rid, id string, attempt int64, code, message string) error {
+	fields := map[string]any{"refresh_code": code, "refresh_message": message}
+	if code == "ok" {
+		fields["refresh_success_at"] = Now()
+	}
+	return s.db.WithContext(ctx).Model(&reviewRecord{}).Where("repository_id = ? AND id = ? AND refresh_attempt = ?", rid, id, attempt).Updates(fields).Error
+}
+
+// Decisions atomically changes an entire selection at one published version.
+func (s *Store) Decisions(ctx context.Context, rid, review string, items []string, decision string, version int64) error {
+	if len(items) == 0 || (decision != "pending" && decision != "approved" && decision != "rejected") {
+		return ErrInvalidArgument
+	}
+	return s.update(ctx, func(tx *gorm.DB) error {
+		var cr reviewRecord
+		if err := tx.Where("id = ? AND repository_id = ?", review, rid).Take(&cr).Error; err != nil {
+			return err
+		}
+		if version <= 0 || version != cr.Version {
+			return ErrStaleView
+		}
+		unique := map[string]bool{}
+		for _, id := range items {
+			unique[id] = true
+		}
+		var count int64
+		query := tx.Model(&reviewItemRecord{}).Where("review_id = ? AND id IN ? AND active = ?", review, items, true)
+		if err := query.Count(&count).Error; err != nil {
+			return err
+		}
+		if count != int64(len(unique)) {
+			return ErrNotFound
+		}
+		return tx.Model(&reviewItemRecord{}).Where("review_id = ? AND id IN ? AND active = ?", review, items, true).Update("decision", decision).Error
+	})
 }

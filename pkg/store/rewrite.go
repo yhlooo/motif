@@ -35,7 +35,19 @@ func (s *Store) ProjectedCommits(rid string) (map[string]bool, error) {
 	return out, nil
 }
 func (s *Store) SaveRewrite(ctx context.Context, w Worktree, kind string, mappings []RewriteMapping, projections []CommitProjection, pending []string, expected int64, resume Observation) error {
-	return s.sourceUpdate(ctx, func(tx *gorm.DB) error {
+	bases := []string{}
+	states := []State{}
+	for _, p := range projections {
+		bases = append(bases, p.Parent)
+		for _, c := range p.Changes {
+			states = append(states, c.Before, c.After)
+		}
+	}
+	prepared, err := s.prepareObservation(ctx, resume, bases, nil, states)
+	if err != nil {
+		return err
+	}
+	return s.sourceUpdate(prepared, func(tx *gorm.DB) error {
 		cursor, err := cursor(tx, w.ID)
 		if err != nil {
 			return err
@@ -73,10 +85,10 @@ func (s *Store) SaveRewrite(ctx context.Context, w Worktree, kind string, mappin
 				if Equal(change.Before, change.After) {
 					continue
 				}
-				if err = s.validateState(change.Before); err != nil {
+				if err = s.validatePrepared(tx, change.Before); err != nil {
 					return err
 				}
-				if err = s.validateState(change.After); err != nil {
+				if err = s.validatePrepared(tx, change.After); err != nil {
 					return err
 				}
 				before, e := s.saveSnapshot(tx, w.ID, projection.Parent, "rewrite_projection", change.Before)
