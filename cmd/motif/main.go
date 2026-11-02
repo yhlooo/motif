@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/yhlooo/motif/pkg/commands"
+	"github.com/yhlooo/motif/internal/transport/cli"
 )
 
 func main() {

@@ -7,8 +7,13 @@
 ├── .github                 # GitHub Actions 等配置
 ├── cmd                     # 程序入口 main 包
 │   └── motif                 # motif 命令 main 包
-├── pkg                     # 代码
-│   ├── commands              # 基于 cobra 的命令行入口实现
+├── internal                # 应用内部实现
+│   ├── domain                # 不可变状态、事实及纯领域规划
+│   ├── content               # 内容引用、对象库及生命周期锁
+│   ├── app                   # 采集、改写、审阅、集成及适配器装配
+│   ├── adapters              # gitrepo / sqlite
+│   └── transport             # cli / web
+├── pkg                     # 共享基础能力
 │   ├── i18n                  # 国际化
 │   └── version               # 版本信息展示
 ├── scripts                 # 其它脚本工具
