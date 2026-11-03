@@ -69,3 +69,70 @@ func TestInstallWarnsBeforeRequiringLocalOverrideConfirmation(t *testing.T) {
 		})
 	}
 }
+
+func TestClaudeCLIInstallDoctorAndSelectiveUninstall(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("MOTIF_DATA_DIR", t.TempDir())
+	if raw, err := exec.Command("git", "init").CombinedOutput(); err != nil {
+		t.Fatalf("%s: %v", raw, err)
+	}
+	// Do not invoke installed agent binaries during the integration lifecycle test.
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err = os.Symlink(git, filepath.Join(bin, "git")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := cli.NewCommand("motif")
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(args, err, out.String())
+		}
+		return out.String()
+	}
+	if out := run("install", "--agent", "claude"); !strings.Contains(out, "claude: installed") {
+		t.Fatal(out)
+	}
+	if out := run("doctor"); !strings.Contains(out, `"claude"`) || !strings.Contains(out, `"unavailable"`) {
+		t.Fatal(out)
+	}
+	run("install", "--agent", "codex")
+	run("uninstall", "--agent", "claude", "-y")
+	if _, err = os.Stat(filepath.Join(root, ".claude", "settings.local.json")); !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(filepath.Join(root, ".codex", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	run("uninstall", "--agent", "codex", "-y")
+	if _, err = os.Stat(filepath.Join(root, ".git", "hooks", "post-commit")); !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestClaudeHookFailsOpenAndKeepsStdoutForProtocol(t *testing.T) {
+	t.Setenv("MOTIF_DATA_DIR", t.TempDir())
+	cmd := cli.NewCommand("motif")
+	var out, stderr bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&stderr)
+	cmd.SetIn(strings.NewReader(`{"hook_event_name":"PreToolUse"}`))
+	cmd.SetArgs([]string{"hook", "claude"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 || !strings.Contains(stderr.String(), "motif capture:") {
+		t.Fatalf("stdout=%s stderr=%s", &out, &stderr)
+	}
+}
