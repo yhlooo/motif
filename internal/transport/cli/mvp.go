@@ -74,7 +74,9 @@ func newHookCommand() *cobra.Command {
 					return e
 				}
 				logger := logr.FromContextOrDiscard(cmd.Context()).V(1)
-				logger.Info("agent hook received", "agent", agent, "input", string(raw))
+				if logger.Enabled() {
+					logger.Info("agent hook received: "+string(raw), "agent", agent)
+				}
 				s, e := openStore()
 				if e != nil {
 					return e
@@ -89,7 +91,10 @@ func newHookCommand() *cobra.Command {
 				if e != nil {
 					return e
 				}
-				logger.Info("agent hook processed", "agent", agent, "response", out)
+				if logger.Enabled() {
+					response, _ := json.Marshal(out)
+					logger.Info("agent hook processed: "+string(response), "agent", agent)
+				}
 				if out != nil {
 					return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 				}
@@ -122,7 +127,7 @@ func newHookCommand() *cobra.Command {
 				}
 				input = bytes.NewReader(raw)
 			}
-			logger.Info("Git hook received", "cwd", dir, "args", args, "input", string(raw))
+			logger.Info("Git hook received: "+string(raw), "cwd", dir, "args", args)
 		}
 		if installedOnly {
 			yes, e := integration.HasGitHook(cmd.Context(), dir, args[0])
