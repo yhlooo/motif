@@ -2,7 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/bombsimon/logrusr/v4"
 	"github.com/go-logr/logr"
@@ -24,7 +28,7 @@ func NewGlobalOptions() GlobalOptions {
 // GlobalOptions 全局选项
 type GlobalOptions struct {
 	// 日志数量级别（ 0 / 1 / 2 ）
-	Verbosity uint32
+	Verbosity uint32 `json:"verbosity"`
 }
 
 // Validate 校验选项是否合法
@@ -79,41 +83,8 @@ func NewCommand(name string) *cobra.Command {
 		SilenceErrors: true,
 		Version:       version.Version,
 
-		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-
-			if err := globalOpts.Validate(); err != nil {
-				return &UsageError{err}
-			}
-			ctx = ContextWithGlobalOptions(ctx, globalOpts)
-
-			// 初始化 logger
-			logrusLogger := logrus.New()
-			switch globalOpts.Verbosity {
-			case 0:
-				logrusLogger.Level = logrus.InfoLevel
-			case 1:
-				logrusLogger.Level = logrus.DebugLevel
-			default:
-				logrusLogger.Level = logrus.TraceLevel
-			}
-			logger := logrusr.New(logrusLogger)
-			ctx = logr.NewContext(ctx, logger)
-
-			// 设置本地化器
-			ctx = i18n.ContextWithLocalizer(ctx, i18n.NewLocalizer(i18n.GetEnvLanguage()))
-
-			cmd.SetContext(ctx)
-
-			return nil
-		},
-
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
-		},
-
-		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
-			return nil
 		},
 	}
 
@@ -126,6 +97,56 @@ func NewCommand(name string) *cobra.Command {
 		newInstallCommand(), newUninstallCommand(), newWebCommand(), newDoctorCommand(),
 	)
 
+	wrapRuntime(cmd, &globalOpts)
 	wrapUsage(cmd)
 	return cmd
+}
+
+func wrapRuntime(cmd *cobra.Command, flags *GlobalOptions) {
+	if run := cmd.RunE; run != nil {
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			dir, err := dataDir()
+			if err != nil {
+				return err
+			}
+			opts := NewGlobalOptions()
+			if cmd.Flags().Changed("verbose") {
+				opts.Verbosity = flags.Verbosity
+			} else {
+				path := filepath.Join(dir, "config.json")
+				raw, err := os.ReadFile(path)
+				if err == nil {
+					if err := json.Unmarshal(raw, &opts); err != nil {
+						return fmt.Errorf("read %s: %w", path, err)
+					}
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+			if err := opts.Validate(); err != nil {
+				return &UsageError{err}
+			}
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				return err
+			}
+			file, err := os.OpenFile(filepath.Join(dir, "motif.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+
+			logger := logrus.New()
+			logger.SetOutput(file)
+			logger.SetLevel([]logrus.Level{logrus.InfoLevel, logrus.DebugLevel, logrus.TraceLevel}[opts.Verbosity])
+
+			ctx := ContextWithGlobalOptions(cmd.Context(), opts)
+			ctx = logr.NewContext(ctx, logrusr.New(logger))
+			ctx = i18n.ContextWithLocalizer(ctx, i18n.NewLocalizer(i18n.GetEnvLanguage()))
+			cmd.SetContext(ctx)
+			return run(cmd, args)
+		}
+	}
+	for _, child := range cmd.Commands() {
+		wrapRuntime(child, flags)
+	}
 }

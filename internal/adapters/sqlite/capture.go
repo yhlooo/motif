@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/go-logr/logr"
 	"github.com/yhlooo/motif/internal/domain"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -88,8 +89,13 @@ func (s *Store) Observe(ctx context.Context, o domain.Observation) error {
 	}
 	defer release()
 	plan, e := s.PrepareCapture(ctx, o)
-	if e != nil || plan.Ignored {
+	if e != nil {
 		return e
+	}
+	if plan.Ignored {
+		logr.FromContextOrDiscard(ctx).V(1).Info("capture observation ignored",
+			"trigger", o.Trigger, "session", o.Session, "turn", o.Turn, "tool_use_id", o.ExternalCall)
+		return nil
 	}
 	states := []domain.State{}
 	for _, sn := range plan.Snapshots {

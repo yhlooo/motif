@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"github.com/yhlooo/motif/internal/adapters/sqlite"
 	"github.com/yhlooo/motif/internal/app/capture"
@@ -71,6 +73,8 @@ func newHookCommand() *cobra.Command {
 				if e != nil {
 					return e
 				}
+				logger := logr.FromContextOrDiscard(cmd.Context()).V(1)
+				logger.Info("agent hook received", "agent", agent, "input", string(raw))
 				s, e := openStore()
 				if e != nil {
 					return e
@@ -85,12 +89,14 @@ func newHookCommand() *cobra.Command {
 				if e != nil {
 					return e
 				}
+				logger.Info("agent hook processed", "agent", agent, "response", out)
 				if out != nil {
 					return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 				}
 				return nil
 			}()
 			if err != nil {
+				logr.FromContextOrDiscard(cmd.Context()).Error(err, "agent hook failed", "agent", agent)
 				fmt.Fprintf(cmd.ErrOrStderr(), "motif capture: %v\n", err)
 			}
 			return nil
@@ -102,6 +108,21 @@ func newHookCommand() *cobra.Command {
 		if err != nil {
 			fmt.Fprintln(cmd.ErrOrStderr(), "motif capture:", err)
 			return nil
+		}
+		logger := logr.FromContextOrDiscard(cmd.Context()).V(1)
+		input := cmd.InOrStdin()
+		if logger.Enabled() {
+			var raw []byte
+			switch args[0] {
+			case "post-rewrite", "reference-transaction":
+				raw, err = io.ReadAll(input)
+				if err != nil {
+					fmt.Fprintln(cmd.ErrOrStderr(), "motif capture:", err)
+					return nil
+				}
+				input = bytes.NewReader(raw)
+			}
+			logger.Info("Git hook received", "cwd", dir, "args", args, "input", string(raw))
 		}
 		if installedOnly {
 			yes, e := integration.HasGitHook(cmd.Context(), dir, args[0])
@@ -116,9 +137,10 @@ func newHookCommand() *cobra.Command {
 		s, err := openStore()
 		if err == nil {
 			defer s.Close()
-			err = capture.GitNotification(cmd.Context(), s, dir, args[0], args[1:], cmd.InOrStdin())
+			err = capture.GitNotification(cmd.Context(), s, dir, args[0], args[1:], input)
 		}
 		if err != nil {
+			logr.FromContextOrDiscard(cmd.Context()).Error(err, "Git hook failed", "args", args)
 			fmt.Fprintln(cmd.ErrOrStderr(), "motif capture:", err)
 		}
 		return nil
