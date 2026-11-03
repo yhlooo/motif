@@ -285,7 +285,7 @@ func Rewrite(ctx context.Context, r *workspace.Project, w domain.Worktree, kind 
 // References records only committed ref notifications; it does not assume that
 // the worktree is already settled (notably during reset/rebase).
 func References(ctx context.Context, r *workspace.Project, w domain.Worktree, phase string, input io.Reader) error {
-	if phase == "prepared" || phase == "aborted" {
+	if phase == "preparing" || phase == "prepared" || phase == "aborted" {
 		return nil
 	}
 	if phase != "committed" {
