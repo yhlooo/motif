@@ -17,7 +17,7 @@ import (
 	"github.com/yhlooo/motif/internal/domain"
 )
 
-type CodexInput struct {
+type ToolHookInput struct {
 	Event   string          `json:"hook_event_name"`
 	CWD     string          `json:"cwd"`
 	Session string          `json:"session_id"`
@@ -28,6 +28,9 @@ type CodexInput struct {
 	Agent   string          `json:"agent_id"`
 	Input   json.RawMessage `json:"tool_input"`
 }
+
+// CodexInput retains the existing adapter input name.
+type CodexInput = ToolHookInput
 
 func Observe(ctx context.Context, r *workspace.Project, w domain.Worktree, o domain.Observation) error {
 	c, err := r.Store.Cursor(w.ID)
@@ -105,6 +108,10 @@ func Codex(ctx context.Context, s *sqlite.Store, raw []byte) (map[string]string,
 	if (input.Event == "PreToolUse" || input.Event == "PostToolUse") && input.ToolID == "" {
 		return nil, fmt.Errorf("hook requires tool_use_id")
 	}
+	return captureAgent(ctx, s, input, raw)
+}
+
+func captureAgent(ctx context.Context, s *sqlite.Store, input ToolHookInput, raw []byte) (map[string]string, error) {
 	r, err := workspace.Open(ctx, input.CWD, s)
 	if err != nil {
 		return nil, err

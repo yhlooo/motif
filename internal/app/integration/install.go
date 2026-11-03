@@ -29,11 +29,12 @@ type File struct {
 	Shared  bool   `json:"shared,omitempty"`
 }
 type Manifest struct {
-	OwnerFile      string `json:"owner_file,omitempty"`
-	ConfigCreated  bool   `json:"config_created,omitempty"`
-	Config         File   `json:"config"`
-	Hooks          []File `json:"hooks"`
-	LocalHooksPath string `json:"local_hooks_path,omitempty"`
+	OwnerFile      string        `json:"owner_file,omitempty"`
+	ConfigCreated  bool          `json:"config_created,omitempty"`
+	Config         File          `json:"config"`
+	Hooks          []File        `json:"hooks"`
+	LocalHooksPath string        `json:"local_hooks_path,omitempty"`
+	Claude         *ClaudeConfig `json:"claude,omitempty"`
 }
 
 func manifestPath(r *workspace.Project) string {
@@ -100,7 +101,10 @@ func Install(ctx context.Context, r *workspace.Project, binary string) (Manifest
 	return InstallWithOptions(ctx, r, binary, InstallOptions{})
 }
 
-type InstallOptions struct{ ConfirmLocalHooksPath bool }
+type InstallOptions struct {
+	ConfirmLocalHooksPath bool
+	Agents                []string
+}
 
 func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string, options InstallOptions) (Manifest, bool, error) {
 	old, err := Load(r)
@@ -115,39 +119,29 @@ func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string
 		return old, false, fmt.Errorf("switching inherited core.hooksPath to %s requires confirmation; global hooks will no longer run in this repository", plan.Path)
 	}
 	m := old
-	config := filepath.Join(r.Root, ".codex", "config.toml")
-	if info, e := os.Lstat(config); e == nil && !info.Mode().IsRegular() {
-		return m, false, fmt.Errorf("refuse to replace non-regular Codex config")
+	agents := options.Agents
+	if len(agents) == 0 {
+		agents = []string{"codex"}
 	}
-	raw, err := os.ReadFile(config)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return m, false, err
-	}
-	if err = validateTOML(raw); err != nil {
-		return m, false, err
-	}
-	existing, err := block(raw)
-	if err != nil {
-		return m, false, err
-	}
-	if existing != nil && string(existing) != old.Config.Content {
-		return m, false, fmt.Errorf("Motif config was changed; inspect %s", config)
-	}
-	next := append([]byte{}, raw...)
-	if existing == nil {
-		m.ConfigCreated = false
-		if _, e := os.Stat(config); os.IsNotExist(e) {
-			m.ConfigCreated = true
+	var next []byte
+	var claudeNext []byte
+	selected := map[string]bool{}
+	for _, agent := range agents {
+		if selected[agent] {
+			continue
 		}
-		m.Config = File{Path: config, Content: configBlock(ctx, binary)}
-		next = append(next, []byte("\n"+m.Config.Content)...)
-	} else {
-		// Only update a block that still matches our recorded installation.
-		m.Config = File{Path: config, Content: configBlock(ctx, binary)}
-		next = bytes.Replace(next, existing, []byte(m.Config.Content), 1)
-	}
-	if err = validateTOML(next); err != nil {
-		return m, false, err
+		selected[agent] = true
+		switch agent {
+		case "codex":
+			m, next, err = prepareCodex(ctx, r, binary, m)
+		case "claude":
+			m.Claude, claudeNext, err = prepareClaude(ctx, r, binary, m.Claude)
+		default:
+			return old, false, fmt.Errorf("unsupported agent %q", agent)
+		}
+		if err != nil {
+			return old, false, err
+		}
 	}
 	m.Hooks = nil
 	backupMoves := map[string]string{}
@@ -240,8 +234,15 @@ func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string
 	}
 	tx := &fileTransaction{}
 	defer tx.rollback()
-	if err = tx.write(config, next, 0600); err != nil {
-		return m, false, err
+	if next != nil {
+		if err = tx.write(m.Config.Path, next, 0600); err != nil {
+			return m, false, err
+		}
+	}
+	if claudeNext != nil {
+		if err = tx.write(m.Claude.Path, claudeNext, 0600); err != nil {
+			return m, false, err
+		}
 	}
 	for source, destination := range backupMoves {
 		if err = tx.move(source, destination); err != nil {
@@ -319,19 +320,26 @@ func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string
 }
 func Verify(m Manifest) error { return verify(m, false) }
 func verify(m Manifest, allowMissing bool) error {
-	data, err := os.ReadFile(m.Config.Path)
-	if err != nil {
-		return err
+	if m.Config.Path != "" {
+		data, err := os.ReadFile(m.Config.Path)
+		if err != nil {
+			return err
+		}
+		if err = validateTOML(data); err != nil {
+			return err
+		}
+		b, err := block(data)
+		if err != nil {
+			return err
+		}
+		if string(b) != m.Config.Content {
+			return fmt.Errorf("Motif config was changed: %s", m.Config.Path)
+		}
 	}
-	if err = validateTOML(data); err != nil {
-		return err
-	}
-	b, err := block(data)
-	if err != nil {
-		return err
-	}
-	if string(b) != m.Config.Content {
-		return fmt.Errorf("Motif config was changed: %s", m.Config.Path)
+	if m.Claude != nil {
+		if _, err := removeClaude(m.Claude, false); err != nil {
+			return err
+		}
 	}
 	for _, h := range m.Hooks {
 		if err := verifyHook(h, allowMissing); err != nil {
@@ -339,68 +347,6 @@ func verify(m Manifest, allowMissing bool) error {
 		}
 	}
 
-	return nil
-}
-func Uninstall(r *workspace.Project, m Manifest) error {
-	if err := verify(m, true); err != nil {
-		return fmt.Errorf("preserving modified configuration: %w", err)
-	}
-	keep, err := otherOwners(r, m)
-	if err != nil {
-		return err
-	}
-	data, err := os.ReadFile(m.Config.Path)
-	if err != nil {
-		return err
-	}
-	next := bytes.Replace(data, []byte(m.Config.Content), nil, 1)
-	if err = validateTOML(next); err != nil {
-		return err
-	}
-	info, err := os.Stat(m.Config.Path)
-	if err != nil {
-		return err
-	}
-	if m.ConfigCreated && strings.TrimSpace(string(next)) == "" {
-		if err = os.Remove(m.Config.Path); err != nil {
-			return err
-		}
-		_ = os.Remove(filepath.Dir(m.Config.Path))
-	} else if err = atomic(m.Config.Path, next, info.Mode().Perm()); err != nil {
-		return err
-	}
-	for _, h := range m.Hooks {
-		if keep[h.Path] {
-			continue
-		}
-		if err = os.Remove(h.Path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		if h.Backup != "" {
-			if err = os.Rename(h.Backup, h.Path); err != nil {
-				return err
-			}
-		}
-	}
-	if m.OwnerFile != "" {
-		if err = os.Remove(m.OwnerFile); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		_ = os.Remove(filepath.Dir(m.OwnerFile))
-	}
-	if m.LocalHooksPath != "" && len(keep) == 0 {
-		current, e := r.Git(context.Background(), "config", "--local", "--get", "core.hooksPath")
-		if e == nil && strings.TrimSpace(string(current)) == m.LocalHooksPath {
-			if _, e = r.Git(context.Background(), "config", "--local", "--unset-all", "core.hooksPath"); e != nil {
-				return e
-			}
-		}
-	}
-	for _, path := range []string{manifestPath(r), filepath.Join(r.GitDir, "motif-install.json")} {
-		if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -533,4 +479,44 @@ func HasGitHook(ctx context.Context, dir, event string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func prepareCodex(ctx context.Context, r *workspace.Project, binary string, old Manifest) (Manifest, []byte, error) {
+	m := old
+	config := filepath.Join(r.Root, ".codex", "config.toml")
+	if info, e := os.Lstat(config); e == nil && !info.Mode().IsRegular() {
+		return m, nil, fmt.Errorf("refuse to replace non-regular Codex config")
+	}
+	raw, err := os.ReadFile(config)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return m, nil, err
+	}
+	if err = validateTOML(raw); err != nil {
+		return m, nil, err
+	}
+	existing, err := block(raw)
+	if err != nil {
+		return m, nil, err
+	}
+	if existing != nil && string(existing) != old.Config.Content {
+		return m, nil, fmt.Errorf("Motif config was changed; inspect %s", config)
+	}
+	next := append([]byte{}, raw...)
+	if existing == nil {
+		m.ConfigCreated = false
+		if _, e := os.Stat(config); os.IsNotExist(e) {
+			m.ConfigCreated = true
+		}
+		m.Config = File{Path: config, Content: configBlock(ctx, binary)}
+		next = append(next, []byte("\n"+m.Config.Content)...)
+	} else {
+		// Only update a block that still matches our recorded installation.
+		m.Config = File{Path: config, Content: configBlock(ctx, binary)}
+		next = bytes.Replace(next, existing, []byte(m.Config.Content), 1)
+	}
+	if err = validateTOML(next); err != nil {
+		return m, nil, err
+	}
+
+	return m, next, nil
 }

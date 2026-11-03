@@ -32,7 +32,7 @@ func Diagnose(ctx context.Context, r *workspace.Project, m Manifest) Diagnostic 
 	if err != nil {
 		return Diagnostic{Status: "unavailable", Detail: "Codex CLI 未安装；配置已生成，尚未检查是否生效。", Hooks: []HookState{}}
 	}
-	if err = Verify(m); err != nil {
+	if err = Verify(RemovalPlan(m, []string{"codex"})); err != nil {
 		return Diagnostic{Status: "conflict", Detail: err.Error(), Hooks: []HookState{}}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -148,4 +148,22 @@ func Diagnose(ctx context.Context, r *workspace.Project, m Manifest) Diagnostic 
 }
 func unavailable(err error) Diagnostic {
 	return Diagnostic{Status: "unavailable", Detail: "无法通过当前 Codex CLI 查询生效配置；请检查 CLI 版本与配置。尚未确认采集生效。", Hooks: []HookState{}}
+}
+
+// DiagnoseAgent distinguishes installed files from effective runtime trust.
+// Claude has no Codex-style hooks/list endpoint; never claim runtime activation.
+func DiagnoseAgent(ctx context.Context, r *workspace.Project, m Manifest, agent string) Diagnostic {
+	if agent == "codex" {
+		return Diagnose(ctx, r, m)
+	}
+	if m.Claude == nil {
+		return Diagnostic{Status: "missing", Detail: "Claude Code integration is not installed.", Hooks: []HookState{}}
+	}
+	if _, err := removeClaude(m.Claude, false); err != nil {
+		return Diagnostic{Status: "conflict", Detail: err.Error(), Hooks: []HookState{}}
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		return Diagnostic{Status: "unavailable", Detail: "Claude Code CLI is not installed; project hooks have been configured.", Hooks: []HookState{}}
+	}
+	return Diagnostic{Status: "configured", Detail: "Claude Code project hooks are configured. Restart Claude Code and inspect /hooks; project trust, managed policy and session overrides determine execution. Capture requires prompt_id in hook input.", Hooks: []HookState{}}
 }

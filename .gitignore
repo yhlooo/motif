@@ -33,4 +33,4 @@ go.work.sum
 
 # AI
 .codex/config.toml
-
+.claude/settings.local.json
