@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,7 +16,7 @@ func main() {
 
 	cmd := cli.NewCommand("motif")
 	if err := cmd.ExecuteContext(ctx); err != nil {
-		log.Print(err)
+		fmt.Fprintln(cmd.ErrOrStderr(), err)
 		os.Exit(cli.ExitCode(err))
 	}
 }
