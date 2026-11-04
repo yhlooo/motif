@@ -8,6 +8,7 @@ function element() {
   return { style: {}, dataset: {}, value: '', textContent: '', disabled: false, open: false, children: [],
     append(...items) { this.children.push(...items); },
     replaceChildren(...items) { this.children = items; },
+    after(...items) { this.afterNodes = items; }, remove() { this.removed = true; },
     attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, removeAttribute(name) { delete this.attributes[name]; }, focus() { this.focused = true; }, showModal() { this.open = true; },
     close() { this.open = false; this.onclose?.(); } };
 }
@@ -216,4 +217,43 @@ test('file tree groups raw path segments and does not merge invalid UTF-8 names'
   assert.equal(tree.children.get('dir:s').removed,1);
   assert.equal([...tree.children.get('dir:s').children.values()][0].name, String.fromCharCode(92)+'xff');
   assert.equal([...tree.children.values()].find(n=>n.name==='中文').children.size,1);
+});
+
+test('inline comments anchor to mapped ranges on the correct side and visible row', async () => {
+  const ui = await setup();
+  const oldRow = {}, newRow = {}, rangeEnd = {};
+  ui.context.fileView = {rows:{old:new Map([[7,oldRow]]),new:new Map([[7,newRow],[9,rangeEnd]])}};
+  ui.context.thread = {side:'new',start:1,end:2,mapped_start:7,mapped_end:9,mapped_ranges:[{start:7,end:7},{start:9,end:9}]};
+  assert.equal(vm.runInContext('commentAnchorRow(thread,fileView)',ui.context),rangeEnd);
+  ui.context.thread.side = 'old';
+  assert.equal(vm.runInContext('commentAnchorRow(thread,fileView)',ui.context),oldRow);
+  ui.context.thread.mapped_ranges = [{start:30,end:35}];
+  assert.equal(vm.runInContext('commentAnchorRow(thread,fileView)',ui.context),null);
+  delete ui.context.thread.mapped_ranges;
+  assert.equal(vm.runInContext('mappedCommentRanges(thread)[0].start',ui.context),7);
+});
+test('inline threads use mapped file paths and keep off-hunk comments inside their file', async () => {
+  const ui = await setup(), oldRow = element(), mappedRow = element(), code = element();
+  ui.context.view = {files:new Map([['old',{rows:{old:new Map(),new:new Map([[7,oldRow]])},code:element()}],['new',{rows:{old:new Map(),new:new Map([[7,mappedRow]])},code}]]),diffFiles:element()};
+  ui.context.threads = [
+    {id:'mapped',path:'old',mapped_path:'new',side:'new',start:1,end:1,mapped_ranges:[{start:7,end:7}],comments:[{author:'User',body:'<script>safe text</script>',created:0}]},
+    {id:'off-hunk',path:'new',side:'old',start:80,end:82,mapped_ranges:[{start:80,end:82}],comments:[]}
+  ];
+  vm.runInContext('threadList=threads;renderThreads(view);',ui.context);
+  assert.equal(oldRow.afterNodes,undefined);
+  assert.equal(mappedRow.afterNodes[0].children[0].dataset.threadId,'mapped');
+  assert.equal(mappedRow.afterNodes[0].children[0].children[2].textContent,'<script>safe text</script>');
+  assert.equal(code.children[0].children[0].dataset.threadId,'off-hunk');
+  assert.match(code.children[0].children[0].children[0].textContent,/当前 diff 未展开/);
+  const oldGroup = mappedRow.afterNodes[0];
+  vm.runInContext('threadList=[];renderThreads(view);',ui.context);
+  assert.equal(oldGroup.removed,true);
+});
+test('comment view guard rejects responses for an old selection or projection', async () => {
+  const ui = await setup();
+  vm.runInContext("current={id:'r',view_version:2,projection_id:'p'};generation=3;",ui.context);
+  ui.context.view = {request:3,reviewId:'r',version:2,projectionID:'p'};
+  assert.equal(vm.runInContext('isCurrentCommentView(view)',ui.context),true);
+  ui.context.view.request=2; assert.equal(vm.runInContext('isCurrentCommentView(view)',ui.context),false);
+  ui.context.view.request=3;ui.context.view.projectionID='old';assert.equal(vm.runInContext('isCurrentCommentView(view)',ui.context),false);
 });
