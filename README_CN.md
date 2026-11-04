@@ -1,3 +1,6 @@
+> [!WARNING]
+> 当前项目处于 Alpha 阶段，后续可能会发生不兼容变更
+
 **[简体中文](README_CN.md)** | [English](README.md)
 
 ---

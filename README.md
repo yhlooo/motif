@@ -1,3 +1,6 @@
+> [!WARNING]
+> This project is currently in Alpha. Future releases may introduce breaking changes.
+
 **[简体中文](README_CN.md)** | [English](README.md)
 
 ---
