@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="490" viewBox="0 0 1100 490" role="img" aria-labelledby="title desc">
+<title id="title">从真实修改，到有层次的审查</title><desc id="desc">Conceptual workflow diagram; not a product screenshot.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="none" stroke="#087f73" stroke-width="1.5"/></marker></defs>
+<rect width="1100" height="490" rx="22" fill="#f3f7f7"/>
+<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Noto Sans CJK SC,Microsoft YaHei,Arial,sans-serif">
+<text x="42" y="45" font-size="14" fill="#087f73" font-weight="700">MOTIF  /  CAPTURE → ORGANIZE → REVIEW</text>
+<text x="42" y="92" font-size="32" fill="#172f3b" font-weight="700">从真实修改，到有层次的审查</text>
+<rect x="42" y="132" width="304" height="224" rx="16" fill="#ffffff" stroke="#d9e4e6"/>
+<text x="64" y="170" font-size="15" fill="#087f73" font-weight="700">01</text>
+<text x="64" y="207" font-size="24" fill="#172f3b" font-weight="700">采集真实变化</text>
+<text x="64" y="247" font-size="17" fill="#536975" font-weight="400">工具调用前后观察工作区</text>
+<text x="64" y="277" font-size="17" fill="#536975" font-weight="400">保留原始修改与当时说明</text>
+<rect x="64" y="307" width="60" height="24" rx="5" fill="#dcefeb" stroke="none"/>
+<rect x="136" y="307" width="60" height="24" rx="5" fill="#e4ebf4" stroke="none"/>
+<rect x="208" y="307" width="60" height="24" rx="5" fill="#f5e8d6" stroke="none"/>
+<path d="M354 244 H388" stroke="#087f73" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="398" y="132" width="304" height="224" rx="16" fill="#ffffff" stroke="#d9e4e6"/>
+<text x="420" y="170" font-size="15" fill="#087f73" font-weight="700">02</text>
+<text x="420" y="207" font-size="24" fill="#172f3b" font-weight="700">整理意图批次</text>
+<text x="420" y="247" font-size="17" fill="#536975" font-weight="400">由正在开发的 Agent 整理</text>
+<text x="420" y="277" font-size="17" fill="#536975" font-weight="400">合并相关的连续修改</text>
+<rect x="420" y="307" width="60" height="24" rx="5" fill="#dcefeb" stroke="none"/>
+<rect x="492" y="307" width="60" height="24" rx="5" fill="#e4ebf4" stroke="none"/>
+<rect x="564" y="307" width="60" height="24" rx="5" fill="#f5e8d6" stroke="none"/>
+<path d="M710 244 H744" stroke="#087f73" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="754" y="132" width="304" height="224" rx="16" fill="#ffffff" stroke="#d9e4e6"/>
+<text x="776" y="170" font-size="15" fill="#087f73" font-weight="700">03</text>
+<text x="776" y="207" font-size="24" fill="#172f3b" font-weight="700">在本地审查</text>
+<text x="776" y="247" font-size="17" fill="#536975" font-weight="400">阅读批次说明与 diff</text>
+<text x="776" y="277" font-size="17" fill="#536975" font-weight="400">评论、批准或要求修改</text>
+<rect x="776" y="307" width="60" height="24" rx="5" fill="#dcefeb" stroke="none"/>
+<rect x="848" y="307" width="60" height="24" rx="5" fill="#e4ebf4" stroke="none"/>
+<rect x="920" y="307" width="60" height="24" rx="5" fill="#f5e8d6" stroke="none"/>
+<rect x="42" y="384" width="1016" height="64" rx="12" fill="#e4f1ee" stroke="none"/>
+<text x="64" y="424" font-size="19" fill="#087f73" font-weight="600">按顺序组合修改 · 校验 Git 最终状态 · 明确展示未知差异</text>
+</g></svg>
