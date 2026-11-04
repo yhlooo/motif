@@ -180,10 +180,10 @@ async function renderSelection() {
   const diffLayout = el('div', 'diff-layout'), diffFiles = el('div', 'diff-files'), fileTargets = [];
   view.diffFiles = diffFiles;
   diffs.forEach(file => {
-    const fileView = { rows: { old: new Map(), new: new Map() } };
-    const box = el('section', 'file'), code = el('div', 'diff'); box.append(el('div', 'file-title', file.path), code); box.tabIndex = -1; fileTargets.push(box); fileView.box = box; fileView.code = code; view.files.set(file.path_base64, fileView);
+    const fileView = { rows: { old: new Map(), new: new Map() } }, lines = file.patch.split('\n');
+    const box = el('section', 'file'), code = el('div', 'diff' + (lines.filter(line => line.length > 0).length >= 200 ? ' diff-scrollable' : '')); box.append(el('div', 'file-title', file.path), code); box.tabIndex = -1; fileTargets.push(box); fileView.box = box; fileView.code = code; view.files.set(file.path_base64, fileView);
     let old = 0, newer = 0, inside = false;
-    file.patch.split('\n').forEach(line => {
+    lines.forEach(line => {
       const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
       if (hunk) { old = Number(hunk[1]); newer = Number(hunk[2]); inside = true; code.append(el('div', 'diff-line hunk', line)); return; }
       if (!inside || !/^[ +\-]/.test(line)) { if (line) code.append(el('div', 'diff-line hunk', line)); return; }
