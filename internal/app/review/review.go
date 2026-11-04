@@ -51,7 +51,7 @@ type RefreshError struct {
 func (e *RefreshError) Error() string { return e.Err.Error() }
 func (e *RefreshError) Unwrap() error { return e.Err }
 
-const projectionAlgorithm = "immutable-state/1"
+const projectionAlgorithm = "immutable-state/2"
 
 func inputSignature(repository, source, target string, revision int64) string {
 	return digest([]any{repository, source, target, "merge_base", revision, projectionAlgorithm})
@@ -239,6 +239,13 @@ func (s *Service) refresh(ctx context.Context, id string) (domain.Review, error)
 func digest(v any) string { raw, _ := json.Marshal(v); return fmt.Sprintf("%x", sha256.Sum256(raw)) }
 func (s *Service) build(ctx context.Context, p Preview, title string) (r domain.Review, err error) {
 	r = domain.Review{ID: domain.ID(), RepositoryID: s.Worktree.RepositoryID, Title: title, Source: p.Source, Target: p.Target, SourceOID: p.SourceOID, TargetOID: p.TargetOID, Base: p.Base, Head: p.Head, Commits: p.Commits, Created: domain.Now(), Status: "in_review", Integrity: "verified", Items: []domain.ReviewItem{}}
+	// Include head: merge-only completion items may refer to a commit omitted
+	// from the non-merge commit list. Metadata is saved with the projection.
+	oids := append(append([]string{}, p.Commits...), p.Head)
+	r.CommitTitles, err = s.Repo.CommitTitles(ctx, oids)
+	if err != nil {
+		return r, err
+	}
 	all, projected, warnings, revision, err := s.Repo.Store.ReviewInputs(ctx, s.Worktree.RepositoryID, p.Commits)
 	if err != nil {
 		return r, err

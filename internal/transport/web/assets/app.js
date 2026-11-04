@@ -41,10 +41,19 @@ function renderReview() {
   top.append(row, range, el('h1', '', current.title), el('div', 'muted', `${current.source} → ${current.target} · ${current.commits.length} 个提交 · ${date(current.created)}`), el('p', '', current.warning));
   const workspace = el('div', 'workspace'), sidebar = el('aside', 'sidebar'), content = el('section', 'content'); content.id = 'content';
   sidebar.append(el('p', '', '按意图审查 · Shift 点击连续选择'));
+  let group = null, previousCommit;
   current.items.forEach((item, index) => {
+    if (!group || item.commit_oid !== previousCommit) {
+      group = el('section', 'commit-group');
+      const heading = el('h3', 'commit-heading'), oid = item.commit_oid || '';
+      const title = current.commit_titles?.[oid] ?? '提交标题不可用';
+      heading.append(el('code', '', oid ? oid.slice(0, 12) : '未归属提交'), el('span', '', oid ? (title || '（无提交标题）') : '未记录所属 commit'));
+      heading.title = oid ? `${oid}\n${title}` : '未记录所属 commit';
+      group.append(heading); sidebar.append(group); previousCommit = item.commit_oid;
+    }
     const b = el('button', 'item' + (index >= first && index <= last ? ' selected' : '')); b.type = 'button'; b.dataset.index = index;
     b.append(el('span', 'number', `${String(index + 1).padStart(2, '0')} / ${item.kind}`), el('strong', '', item.title), el('br'), badge(item.decision));
-    b.onclick = safe(async event => { if (event.shiftKey) { first = Math.min(anchor, index); last = Math.max(anchor, index); } else { first = last = anchor = index; } selectedLine = null; renderReview(); await renderSelection(); }); sidebar.append(b);
+    b.onclick = safe(async event => { if (event.shiftKey) { first = Math.min(anchor, index); last = Math.max(anchor, index); } else { first = last = anchor = index; } selectedLine = null; renderReview(); await renderSelection(); }); group.append(b);
   }); workspace.append(sidebar, content); app.append(top, workspace);
 }
 async function renderSelection() {
