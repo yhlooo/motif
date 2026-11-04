@@ -1,4 +1,4 @@
-# Git commit subject formatting — excerpts
+# Git commit message formatting — excerpts
 
 Source: https://git-scm.com/docs/pretty-formats
 Retrieved: 2026-11-04
@@ -10,6 +10,10 @@ Retrieved: 2026-11-04
 > `%s`
 >
 > subject
+
+> `%B`
+>
+> raw body (unwrapped subject and body)
 
 Source: https://git-scm.com/docs/git-log
 Retrieved: 2026-11-04

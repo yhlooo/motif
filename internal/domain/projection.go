@@ -170,6 +170,7 @@ func AssembleProjection(in ProjectionInput) (Review, error) {
 		History, Warning           string
 		Diagnostics                []Diagnostic
 		CommitTitles               map[string]string
-	}{r.SourceOID, r.TargetOID, r.Base, r.Head, r.Commits, identities, r.History, r.Warning, r.Diagnostics, r.CommitTitles})
+		CommitMessages             map[string]string
+	}{r.SourceOID, r.TargetOID, r.Base, r.Head, r.Commits, identities, r.History, r.Warning, r.Diagnostics, r.CommitTitles, r.CommitMessages})
 	return r, nil
 }

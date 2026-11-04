@@ -51,7 +51,7 @@ type RefreshError struct {
 func (e *RefreshError) Error() string { return e.Err.Error() }
 func (e *RefreshError) Unwrap() error { return e.Err }
 
-const projectionAlgorithm = "immutable-state/2"
+const projectionAlgorithm = "immutable-state/3"
 
 func inputSignature(repository, source, target string, revision int64) string {
 	return digest([]any{repository, source, target, "merge_base", revision, projectionAlgorithm})
@@ -242,7 +242,7 @@ func (s *Service) build(ctx context.Context, p Preview, title string) (r domain.
 	// Include head: merge-only completion items may refer to a commit omitted
 	// from the non-merge commit list. Metadata is saved with the projection.
 	oids := append(append([]string{}, p.Commits...), p.Head)
-	r.CommitTitles, err = s.Repo.CommitTitles(ctx, oids)
+	r.CommitMessages, err = s.Repo.CommitMessages(ctx, oids)
 	if err != nil {
 		return r, err
 	}

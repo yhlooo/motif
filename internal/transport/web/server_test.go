@@ -46,7 +46,7 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 		t.Fatal(e)
 	}
 	git("add", ".")
-	git("commit", "-m", "change")
+	git("commit", "-m", "change", "-m", "Full message body.\n\nSecond paragraph with 中文 & <script>.")
 	s, e := sqlite.Open(t.TempDir())
 	if e != nil {
 		t.Fatal(e)
@@ -109,8 +109,8 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &cr) != nil {
 		t.Fatal(rec.Body.String())
 	}
-	if cr.CommitTitles[p.SourceOID] != "change" {
-		t.Fatal("commit title missing from API", cr.CommitTitles)
+	if cr.CommitMessages[p.SourceOID] != "change\n\nFull message body.\n\nSecond paragraph with 中文 & <script>.\n" {
+		t.Fatal("commit message missing from API", cr.CommitMessages)
 	}
 	item := cr.Items[0].ID
 	prefix := "/api/code-reviews/" + cr.ID
@@ -198,12 +198,12 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte("+second")) || bytes.Contains(rec.Body.Bytes(), []byte("+third")) {
 		t.Fatal("old projection was overwritten", rec.Body.String())
 	}
-	if refreshed.CommitTitles[p.SourceOID] != "change" || refreshed.CommitTitles[refreshed.SourceOID] != "advance source" {
-		t.Fatal("refreshed commit titles missing", refreshed.CommitTitles)
+	if refreshed.CommitMessages[p.SourceOID] != cr.CommitMessages[p.SourceOID] || refreshed.CommitMessages[refreshed.SourceOID] != "advance source\n" {
+		t.Fatal("refreshed commit messages missing", refreshed.CommitMessages)
 	}
 	var historical domain.Review
-	if rec := call("GET", prefix+"?projection_id="+cr.ProjectionID, nil); rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &historical) != nil || historical.CommitTitles[p.SourceOID] != "change" {
-		t.Fatal("historical commit title missing", rec.Body.String())
+	if rec := call("GET", prefix+"?projection_id="+cr.ProjectionID, nil); rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &historical) != nil || historical.CommitMessages[p.SourceOID] != cr.CommitMessages[p.SourceOID] {
+		t.Fatal("historical commit message missing", rec.Body.String())
 	}
 	// Deleting both tracking branches only prevents updates, never reading or
 	// reviewing the last published commit range.
@@ -214,9 +214,9 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 		t.Fatal("missing branch", rec.Body.String())
 	}
 	rec = call("GET", prefix, nil)
-	var savedTitles domain.Review
-	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &savedTitles) != nil || savedTitles.CommitTitles[refreshed.SourceOID] != "advance source" {
-		t.Fatal("deleted branches lost commit titles", rec.Body.String())
+	var savedMessages domain.Review
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &savedMessages) != nil || savedMessages.CommitMessages[refreshed.SourceOID] != "advance source\n" {
+		t.Fatal("deleted branches lost commit messages", rec.Body.String())
 	}
 	for _, path := range []string{"/api/code-reviews", prefix, prefix + "/diff?first=" + refreshed.Items[0].ID + "&last=" + refreshed.Items[0].ID, prefix + "/threads"} {
 		rec = call("GET", path, nil)

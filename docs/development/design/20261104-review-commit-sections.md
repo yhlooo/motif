@@ -4,24 +4,34 @@
 
 用户要求左侧分批列表体现 commit 边界，每节显示 commit hash 和标题，下方容纳该提交的一个或多个分批。
 
-按当前有序审阅项中相邻的 `commit_oid` 划分节，节头以小字显示 12 位 hash 和完整 subject，并提供完整 hash 的悬停提示。节间使用分隔线及留白。标题通过 textContent 写入并允许换行。
+按当前有序审阅项中相邻的 `commit_oid` 划分节，节头以小字显示 12 位 hash 和 message 第一行标题，悬停显示完整 hash 和完整 commit message。节间使用分隔线及留白。标题通过 textContent 写入并允许换行。
 
 不排序、不合并审阅项，不跨不相邻的项重新分组；保持投影连续状态链及全局索引。Shift 连续选择可以跨 commit 节，审批、评论和 diff 仍使用原审阅项身份。没有提交归属的兼容数据明确标记未归属，不猜测。
 
 ## 数据与存储边界
 
-- Git adapter 按完整 OID 批量读取 subject；领域模型 `Review.CommitTitles` 保存 OID 到标题的映射，原 `commits` 数组保持兼容。
-- 应用构建阶段读取非 merge 提交及 head 的标题。head 用于最终差异补齐项，也覆盖只有 merge 独有差异的审查。
-- 标题随不可变 projection 的 JSON payload 保存，无数据库 schema 变更。详情、历史投影和列表读取不新增 Git 访问，分支删除或刷新失败不影响已保存标题。
-- 输入算法标识更新为 `immutable-state/2`，标题纳入视图摘要；旧审查在正常刷新时补齐元数据，通过原稳定身份保留批准及评论。旧 payload 若刷新失败，仍按 hash 分节并显示“提交标题不可用”；空 subject 显示“（无提交标题）”。
+- Git adapter 按完整 OID 批量读取完整 message；领域模型 `Review.CommitMessages` 保存 OID 到完整 message 的映射，原 `commits` 数组保持兼容。
+- 应用构建阶段读取非 merge 提交及 head 的完整 message。head 用于最终差异补齐项，也覆盖只有 merge 独有差异的审查。
+- 完整 message 随不可变 projection 的 JSON payload 保存，无数据库 schema 变更。详情、历史投影和列表读取不新增 Git 访问，分支删除或刷新失败不影响已保存 message。
+- 输入算法标识更新为 `immutable-state/3`，完整 message 纳入视图摘要；旧审查在正常刷新时补齐元数据，通过原稳定身份保留批准及评论。旧的 `commit_titles` 字段仅用于兼容读取历史 payload。旧 payload 若刷新失败，有标题则继续展示原标题，没有则显示“提交标题不可用”，不将标题当作完整 message；空 message 显示“（无提交标题）”。
 
 Git 格式调查见 [研究记录](../research/20261104-git-commit-subjects.md)。
 
 ## 验证
 
-- Git adapter 真实仓库测试覆盖批量 subject 读取及空标题、中文、特殊字符。
-- Web API 测试覆盖创建、更新、历史投影及删除分支后的标题读取。
-- 审查测试覆盖 merge-only 最终补齐项的标题及旧 payload 刷新补齐后保留批准。
-- 页面脚本测试覆盖同 commit 多批次、多个 commit、跨节 Shift 选择及旧 payload 降级显示。
+- Git adapter 真实仓库测试覆盖完整 message 读取及空 message、正文、空行、末尾换行、中文和特殊字符。
+- Web API 测试覆盖创建、更新、历史投影及删除分支后的完整 message 读取。
+- 审查测试覆盖 merge-only 最终补齐项的 message 及仅存标题的旧 payload 刷新补齐后保留批准。
+- 页面脚本测试覆盖同 commit 多批次、多个 commit、跨节 Shift 选择、标题与完整悬停文案、空 message 及旧 payload 降级显示。
 
-验证结果：6 项页面脚本测试通过；review、web、domain、sqlite 相关 Go 包及新增 Git adapter 测试通过；旧 payload 补齐专项测试通过。独立无头 Chrome 在 1280px 和 390px 下用两个 commit、三个批次及超长中文标题检查分节、文字转义、跨节 Shift 选择，均无横向溢出或页面错误。
+本次完整 message 变更验证：7 项页面脚本测试通过；review、web、sqlite 相关 Go 包及 Git adapter 的完整 message 专项测试通过。覆盖全文读取、持久化、历史投影、分支删除后的读取，以及仅存标题的旧 payload 刷新补齐后保留批准。
+
+此前分节布局已通过独立无头 Chrome 在 1280px 和 390px 下验证：两个 commit、三个批次、超长中文标题、文字转义及跨节 Shift 选择均无横向溢出或页面错误。本次不改变分节布局，悬停内容由页面脚本测试验证完整字符串及换行。
+
+## 紧凑分批项
+
+按用户反馈将每项调整为两行：第一行小字显示全局序号与审查状态，两者一起左对齐、间隔 8px，移除 `/ batch` 等类型文案；第二行显示原列表标题。标题超宽时以 CSS 省略号截断；多行标题仅显示第一行并附省略号，鼠标悬停显示完整标题。右侧详情继续展示完整标题和说明。
+
+每项上下内边距从 16px 减至 8px，项间距从 8px 减至 4px。状态移到首行，移除原先状态上方的 10px 留白，保留 commit 分节和原连续选择行为。
+
+紧凑布局验证：7 项前端测试通过。独立无头 Chrome 在 1280px 和 390px 下验证普通、超长和多行标题，均保持相同的 63.5px 项高度；上下内边距为 8px、项间距为 4px，长标题单行省略、多行标题首行省略及完整悬停文案正常，跨节连续选择通过，页面无横向溢出及脚本错误。
