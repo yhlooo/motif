@@ -34,6 +34,7 @@ async function openReview(id) {
   current = await api('code-reviews/' + id); first = last = anchor = 0; history.replaceState(null, '', '#review=' + id); renderReview(); await renderSelection(); if(refreshError) error(refreshError);
 }
 function renderReview() {
+  closeComposer();
   const sidebarScrollTop = $('.sidebar')?.scrollTop || 0;
   app.replaceChildren(); const top = el('section', 'review-top'), row = el('div', 'row');
   const back = el('a', '', '← 全部审查'); back.href = '/'; row.append(back, badge(current.status));
@@ -156,6 +157,8 @@ async function renderSelection() {
   const request = ++generation, reviewId = current.id, firstId = current.items[first].id, lastId = current.items[last].id;
   const [diffs, threads] = await Promise.all([api(`code-reviews/${reviewId}/diff?first=${encodeURIComponent(firstId)}&last=${encodeURIComponent(lastId)}&view_version=${current.view_version}&projection_id=${encodeURIComponent(current.projection_id)}`), api(`code-reviews/${reviewId}/threads?first=${encodeURIComponent(firstId)}&last=${encodeURIComponent(lastId)}&view_version=${current.view_version}&projection_id=${encodeURIComponent(current.projection_id)}`)]);
   if (request !== generation || current.id !== reviewId) return; threadList = threads;
+  closeComposer();
+  const view = { request, reviewId, firstID: firstId, lastID: lastId, version: current.view_version, projectionID: current.projection_id, files: new Map() };
   const root = $('#content'); root.replaceChildren();
   root.append(el('span', 'eyebrow', first === last ? 'INTENT BATCH' : 'COMBINED DIFF'), el('h2', '', first === last ? current.items[first].title : `合并审查第 ${first + 1}–${last + 1} 项`));
   for (let i = first; i <= last; i++) if (current.items[i].description) root.append(el('div', 'description', current.items[i].description));
@@ -173,11 +176,12 @@ async function renderSelection() {
     node.textContent = JSON.stringify(data.event, null, 2) + '\n\n' + data.diff.map(f => f.patch).join('\n');
   }))); if (sources.childNodes.length) root.append(sources);
   root.append(el('p', 'muted', '点击行号添加评论；Shift 点击同一侧的另一行选择行范围。'));
-  const composer = el('div'); composer.id = 'composer'; root.append(composer);
   if (!diffs.length) root.append(el('div', 'empty', '所选修改互相抵消，净差异为空。原始事件仍可追溯。'));
   const diffLayout = el('div', 'diff-layout'), diffFiles = el('div', 'diff-files'), fileTargets = [];
+  view.diffFiles = diffFiles;
   diffs.forEach(file => {
-    const box = el('section', 'file'), code = el('div', 'diff'); box.append(el('div', 'file-title', file.path), code); box.tabIndex = -1; fileTargets.push(box);
+    const fileView = { rows: { old: new Map(), new: new Map() } };
+    const box = el('section', 'file'), code = el('div', 'diff'); box.append(el('div', 'file-title', file.path), code); box.tabIndex = -1; fileTargets.push(box); fileView.box = box; fileView.code = code; view.files.set(file.path_base64, fileView);
     let old = 0, newer = 0, inside = false;
     file.patch.split('\n').forEach(line => {
       const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
@@ -186,38 +190,155 @@ async function renderSelection() {
       const row = el('div', 'diff-line' + (line[0] === '+' ? ' add' : line[0] === '-' ? ' del' : ''));
       const oldNo = line[0] === '+' ? null : old++, newNo = line[0] === '-' ? null : newer++;
       for (const [side, num] of [['old', oldNo], ['new', newNo]]) {
+        if (num !== null) fileView.rows[side].set(num, row);
         const b = el('button', 'line-no', num === null ? '' : String(num)); b.type = 'button'; b.disabled = num === null;
         b.setAttribute('aria-label', `${side === 'old' ? '旧' : '新'}侧第 ${num} 行评论`);
         b.onclick = event => {
           if (event.shiftKey && selectedLine && selectedLine.path === file.path_base64 && selectedLine.side === side) { selectedLine.end = Math.max(selectedLine.anchor, num); selectedLine.start = Math.min(selectedLine.anchor, num); }
           else selectedLine = { path: file.path_base64, display: file.path, side, start: num, end: num, anchor: num };
-          showComposer(firstId, lastId);
+          showComposer(view, b);
         }; row.append(b);
       } row.append(el('span', 'code', line)); code.append(row);
     }); diffFiles.append(box);
   });
   if (diffs.length) { diffLayout.append(diffFiles, renderDiffTree(diffs, fileTargets)); root.append(diffLayout); }
-  renderThreads(firstId, lastId);
+  else if (threads.length) root.append(diffFiles);
+  renderThreads(view);
 }
-function showComposer(firstId, lastId) {
-  const root = $('#composer'); root.replaceChildren(); const box = el('section', 'composer'), selection = { ...selectedLine };
-  box.append(el('p', '', `${selection.display} · ${selection.side === 'old' ? '旧' : '新'}侧 ${selection.start}–${selection.end} 行`));
-  const text = el('textarea'); text.setAttribute('aria-label', '行评论'); box.append(text);
-  box.append(button('发表行评论', async () => {
-    if (!text.value.trim()) throw new Error('请输入评论内容');
-    await api(`code-reviews/${current.id}/threads`, 'POST', { first: firstId, last: lastId, path: selection.path, side: selection.side, start: selection.start, end: selection.end, body: text.value,view_version:current.view_version }); selectedLine = null; await renderSelection();
-  }), button('取消', () => { root.replaceChildren(); selectedLine = null; }, 'secondary')); root.append(box); text.focus();
+let commentComposer = null, commentRefreshGeneration = 0;
+function isCurrentCommentView(view) {
+  return generation === view.request && current?.id === view.reviewId && current.view_version === view.version && current.projection_id === view.projectionID;
 }
-function renderThreads(firstId, lastId) {
-  const root = el('section', 'threads'); root.append(el('h2', '', '当前视图评论'));
-  const matching = threadList;
-  if (!matching.length) root.append(el('p', 'muted', '暂无评论。批准和评论均保存在本机，不会执行 Git 合并。'));
-  matching.forEach(thread => {
-    const box = el('article', 'thread'); box.append(el('div', 'muted', `${thread.side === 'old' ? '旧' : '新'}侧第 ${(thread.mapped_ranges || [{start:thread.start,end:thread.end}]).map(r => `${r.start}–${r.end}`).join('、')} 行 · 内容 ${thread.content_ref.slice(0, 12)}`));
-    thread.comments.forEach(c => { box.append(el('div', 'muted', `${c.author} · ${date(c.created)}`), el('p', '', c.body)); });
-    const text = el('textarea'); text.placeholder = '回复这条评论…'; text.setAttribute('aria-label', '回复评论');
-    box.append(text, button('回复', async () => { if (!text.value.trim()) throw new Error('请输入回复内容'); await api(`comment-threads/${thread.id}/replies`, 'POST', { body: text.value, view_version: current.view_version }); await renderSelection(); })); root.append(box);
-  }); $('#content').append(root);
+function mappedCommentRanges(thread) {
+  return thread.mapped_ranges?.length ? thread.mapped_ranges : [{ start: thread.mapped_start || thread.start, end: thread.mapped_end || thread.end }];
+}
+function commentAnchorRow(thread, file) {
+  const rows = file.rows[thread.side], ranges = mappedCommentRanges(thread);
+  let result = null;
+  for (const [number, row] of rows) if (ranges.some(range => number >= range.start && number <= range.end)) result = row;
+  return result;
+}
+function clearCommentSelection(view) {
+  for (const file of view.files.values()) for (const rows of Object.values(file.rows)) for (const row of rows.values()) row.classList.remove('chosen');
+}
+function closeComposer(returnFocus = false) {
+  if (!commentComposer) return;
+  const state = commentComposer; commentComposer = null;
+  state.box.remove(); state.observer?.disconnect();
+  document.removeEventListener('scroll', state.position, true);
+  window.removeEventListener('resize', state.position);
+  document.removeEventListener('keydown', state.keydown);
+  clearCommentSelection(state.view); selectedLine = null;
+  if (returnFocus && state.anchor.isConnected) state.anchor.focus({ preventScroll: true });
+}
+async function refreshCommentThreads(view) {
+  const request = ++commentRefreshGeneration;
+  const threads = await api(`code-reviews/${view.reviewId}/threads?first=${encodeURIComponent(view.firstID)}&last=${encodeURIComponent(view.lastID)}&view_version=${view.version}&projection_id=${encodeURIComponent(view.projectionID)}`);
+  if (!isCurrentCommentView(view) || request !== commentRefreshGeneration) return;
+  const positions = [...view.files.values()].map(file => [file.code, file.code.scrollTop, file.code.scrollLeft]);
+  const x = window.scrollX, y = window.scrollY;
+  threadList = threads; renderThreads(view);
+  positions.forEach(([code, top, left]) => { code.scrollTop = top; code.scrollLeft = left; });
+  window.scrollTo(x, y);
+  commentComposer?.position();
+}
+function showComposer(view, anchorButton) {
+  if (commentComposer?.submitting || !isCurrentCommentView(view)) return;
+  const selection = { ...selectedLine }, draft = commentComposer?.saved ? '' : (commentComposer?.text.value || '');
+  closeComposer(); selectedLine = selection;
+  const box = el('section', 'composer line-composer'), text = el('textarea'), status = el('p', 'comment-error');
+  box.setAttribute('role', 'dialog'); box.setAttribute('aria-label', '添加行评论');
+  status.setAttribute('role', 'alert'); status.hidden = true;
+  box.append(el('p', 'composer-location', `${selection.display} · ${selection.side === 'old' ? '旧' : '新'}侧第 ${selection.start}–${selection.end} 行`));
+  text.value = draft; text.placeholder = '针对这些代码写下评论…'; text.setAttribute('aria-label', '行评论');
+  const state = { box, text, view, anchor: anchorButton, submitting: false, saved: false };
+  const submit = button('发表评论', async () => {
+    if (state.submitting) return;
+    if (!isCurrentCommentView(view)) { status.hidden = false; status.textContent = '审查范围已变化，请重新选择代码行。'; return; }
+    if (!text.value.trim()) { status.hidden = false; status.textContent = '请输入评论内容。'; return; }
+    state.submitting = true; submit.disabled = true; text.disabled = true; status.hidden = true;
+    try {
+      if (!state.saved) {
+        await api(`code-reviews/${view.reviewId}/threads`, 'POST', { first: view.firstID, last: view.lastID, path: selection.path, side: selection.side, start: selection.start, end: selection.end, body: text.value, view_version: view.version });
+        state.saved = true;
+      }
+      await refreshCommentThreads(view);
+      if (commentComposer === state) closeComposer(true);
+    } catch (e) {
+      status.hidden = false; status.textContent = (state.saved ? '评论已保存，加载失败：' : '') + e.message;
+    } finally {
+      state.submitting = false; submit.disabled = false; text.disabled = state.saved;
+      submit.textContent = state.saved ? '重新加载评论' : '发表评论'; state.position();
+    }
+  });
+  const actions = el('div', 'comment-actions'); actions.append(submit, button('取消', () => closeComposer(true), 'secondary'));
+  box.append(text, status, actions);
+  state.position = () => {
+    if (commentComposer !== state) return;
+    const rect = anchorButton.getBoundingClientRect(), clip = anchorButton.closest('.diff').getBoundingClientRect();
+    const visible = anchorButton.isConnected && rect.bottom > Math.max(0, clip.top) && rect.top < Math.min(window.innerHeight, clip.bottom) && rect.right > Math.max(0, clip.left) && rect.left < Math.min(window.innerWidth, clip.right);
+    box.hidden = !visible;
+    if (!visible) return;
+    const width = box.offsetWidth, height = box.offsetHeight, margin = 8;
+    const left = Math.max(margin, Math.min(rect.right + 8, window.innerWidth - width - margin));
+    let top = rect.bottom + 6;
+    if (top + height > window.innerHeight - margin) top = Math.max(margin, rect.top - height - 6);
+    box.style.left = left + 'px'; box.style.top = top + 'px';
+  };
+  state.keydown = event => {
+    if (event.key === 'Escape') { event.preventDefault(); closeComposer(true); }
+  };
+  text.onkeydown = event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); submit.click(); } };
+  commentComposer = state; document.body.append(box);
+  const file = view.files.get(selection.path);
+  for (const [number, row] of file.rows[selection.side]) if (number >= selection.start && number <= selection.end) row.classList.add('chosen');
+  document.addEventListener('scroll', state.position, true); window.addEventListener('resize', state.position); document.addEventListener('keydown', state.keydown);
+  if (typeof ResizeObserver === 'function') { state.observer = new ResizeObserver(state.position); state.observer.observe(box); }
+  state.position(); text.focus({ preventScroll: true });
+}
+function renderCommentThread(thread, view, outsideHunk) {
+  const box = el('article', 'thread'); box.dataset.threadId = thread.id;
+  const ranges = mappedCommentRanges(thread).map(range => range.start === range.end ? String(range.start) : `${range.start}–${range.end}`).join('、');
+  box.append(el('div', 'muted', `${thread.side === 'old' ? '旧' : '新'}侧第 ${ranges} 行${outsideHunk ? ' · 当前 diff 未展开此处代码' : ''}`));
+  thread.comments.forEach(comment => { box.append(el('div', 'comment-author', `${comment.author} · ${date(comment.created)}`), el('p', 'comment-body', comment.body)); });
+  const reply = el('details', 'inline-reply'), text = el('textarea'), status = el('p', 'comment-error');
+  const summary = el('summary', '', '回复'); text.placeholder = '回复这条评论…'; text.setAttribute('aria-label', '回复评论'); status.setAttribute('role', 'alert'); status.hidden = true;
+  let saved = false, submitting = false;
+  const submit = button('发送回复', async () => {
+    if (submitting) return;
+    if (!isCurrentCommentView(view)) { status.hidden = false; status.textContent = '审查范围已变化，请重新打开评论。'; return; }
+    if (!text.value.trim()) { status.hidden = false; status.textContent = '请输入回复内容。'; return; }
+    submitting = true; submit.disabled = true; text.disabled = true; status.hidden = true;
+    try {
+      if (!saved) { await api(`comment-threads/${thread.id}/replies`, 'POST', { body: text.value, view_version: view.version }); saved = true; }
+      await refreshCommentThreads(view);
+    } catch (e) { status.hidden = false; status.textContent = (saved ? '回复已保存，加载失败：' : '') + e.message; }
+    finally { submitting = false; submit.disabled = false; text.disabled = saved; submit.textContent = saved ? '重新加载回复' : '发送回复'; }
+  });
+  reply.append(summary, text, status, submit); box.append(reply); return box;
+}
+function renderThreads(view) {
+  view.threadContainers?.forEach(container => container.remove()); view.threadContainers = [];
+  for (const [path, file] of view.files) if (file.commentOnly) { file.box.remove(); view.files.delete(path); }
+  const groups = new Map();
+  for (const thread of threadList) {
+    const path = thread.mapped_path || thread.path;
+    let file = view.files.get(path);
+    if (!file) {
+      const section = el('section', 'file comment-only-file'), code = el('div', 'diff');
+      const display = diffPathParts({ path: '', path_base64: path }).map(part => part.name).join('/');
+      section.append(el('div', 'file-title', display), code); view.diffFiles.append(section);
+      file = { box: section, code, rows: { old: new Map(), new: new Map() }, commentOnly: true }; view.files.set(path, file);
+    }
+    const row = commentAnchorRow(thread, file), key = row || file.code;
+    let group = groups.get(key);
+    if (!group) {
+      group = el('div', 'inline-threads');
+      if (row) row.after(group); else file.code.append(group);
+      groups.set(key, group); view.threadContainers.push(group);
+    }
+    group.append(renderCommentThread(thread, view, !row));
+  }
 }
 let previewGeneration = 0, creatingReview = false, titleTouched = false;
 const createForm = $('#create-form'), createDialog = $('#create-dialog');
