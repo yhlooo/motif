@@ -21,6 +21,10 @@ type Service struct {
 	Repo     *workspace.Project
 	Worktree domain.Worktree
 }
+
+// ErrBranchesChanged indicates that the preview no longer matches the tracking branches.
+var ErrBranchesChanged = errors.New("branches changed; preview the range again")
+
 type Preview struct {
 	Source    string             `json:"source"`
 	Target    string             `json:"target"`
@@ -131,7 +135,7 @@ func (s *Service) Create(ctx context.Context, p Preview, title string) (r domain
 		return r, err
 	}
 	if current.SourceOID != p.SourceOID || current.TargetOID != p.TargetOID {
-		return r, fmt.Errorf("branches changed; preview the range again")
+		return r, ErrBranchesChanged
 	}
 	p = current
 	r, err = s.build(ctx, current, title)
@@ -147,7 +151,7 @@ func (s *Service) Create(ctx context.Context, p Preview, title string) (r domain
 			return r, e
 		}
 		if candidate.SourceOID != p.SourceOID || candidate.TargetOID != p.TargetOID {
-			return r, fmt.Errorf("branches changed; preview the range again")
+			return r, ErrBranchesChanged
 		}
 	}
 	if err = s.Repo.Store.SaveReview(ctx, s.Worktree, &r); err != nil {
