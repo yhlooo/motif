@@ -147,6 +147,8 @@ type Review struct {
 	Commits        []string     `json:"commits"`
 	Items          []ReviewItem `json:"items"`
 
+	CommitMessages map[string]string `json:"commit_messages,omitempty"`
+	// CommitTitles reads legacy projections that stored only subjects.
 	CommitTitles map[string]string `json:"commit_titles,omitempty"`
 }
 type ReviewItem struct {

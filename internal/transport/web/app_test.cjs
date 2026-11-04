@@ -118,17 +118,25 @@ test('sidebar sections show commit metadata and preserve global selection across
   const ui = await setup();
   ui.context.fixture = { id: 'review', title: 'Review', status: 'in_review', created: 0,
     target_oid: '0'.repeat(40), source_oid: 'b'.repeat(40), commits: ['a'.repeat(40), 'b'.repeat(40)],
-    commit_titles: { ['a'.repeat(40)]: 'First <script> commit', ['b'.repeat(40)]: 'Second commit' },
-    items: ['a', 'a', 'b'].map((c, index) => ({ id: String(index), commit_oid: c.repeat(40), title: 'Batch ' + index, kind: 'batch', decision: 'pending' })) };
+    commit_messages: { ['a'.repeat(40)]: 'First <script> commit\n\nBody with 中文 & <script>.\n\nSecond paragraph.\n', ['b'.repeat(40)]: 'Second commit\n' },
+    items: ['a', 'a', 'b'].map((c, index) => ({ id: String(index), commit_oid: c.repeat(40), title: index === 0 ? 'First line\nFull second line' : 'Batch ' + index, kind: 'batch', decision: 'pending' })) };
   vm.runInContext('current = fixture; renderReview(); renderSelection = async () => {};', ui.context);
   let sidebar = ui.get('#app').children[1].children[0];
   assert.equal(sidebar.children.length, 3);
   const [firstGroup, secondGroup] = sidebar.children.slice(1);
   assert.equal(firstGroup.children.length, 3);
+  const firstItem = firstGroup.children[1];
+  assert.equal(firstItem.children.length, 2);
+  assert.equal(firstItem.children[0].children[0].textContent, '01');
+  assert.equal(firstItem.children[0].children[1].textContent, '待审查');
+  assert.equal(firstItem.children[1].textContent, 'First line…');
+  assert.equal(firstItem.title, 'First line\nFull second line');
   assert.equal(secondGroup.children.length, 2);
   assert.equal(firstGroup.children[0].children[0].textContent, 'a'.repeat(12));
   assert.equal(firstGroup.children[0].children[1].textContent, 'First <script> commit');
   assert.equal(secondGroup.children[0].children[1].textContent, 'Second commit');
+  assert.equal(firstGroup.children[0].title, 'a'.repeat(40) + '\n' + ui.context.fixture.commit_messages['a'.repeat(40)]);
+  assert.equal(secondGroup.children[0].title, 'b'.repeat(40) + '\nSecond commit\n');
   await secondGroup.children[1].onclick({ shiftKey: true });
   assert.equal(vm.runInContext('first', ui.context), 0);
   assert.equal(vm.runInContext('last', ui.context), 2);
@@ -137,6 +145,17 @@ test('sidebar sections show commit metadata and preserve global selection across
   await sidebar.children[1].children[2].onclick({ shiftKey: false });
   assert.equal(vm.runInContext('first', ui.context), 1);
   assert.equal(vm.runInContext('last', ui.context), 1);
+  vm.runInContext('delete current.commit_messages; current.commit_titles = {[current.items[0].commit_oid]: "Legacy title"}; renderReview();', ui.context);
+  assert.equal(ui.get('#app').children[1].children[0].children[1].children[0].children[1].textContent, 'Legacy title');
   vm.runInContext('delete current.commit_titles; renderReview();', ui.context);
   assert.equal(ui.get('#app').children[1].children[0].children[1].children[0].children[1].textContent, '提交标题不可用');
+});
+
+test('empty commit message shows a placeholder and still renders a hover hint', async () => {
+  const ui = await setup();
+  ui.context.fixture = { title: 'Review', status: 'in_review', created: 0, source_oid: 'a'.repeat(40), target_oid: 'b'.repeat(40), commits: [], commit_messages: { ['a'.repeat(40)]: '' }, items: [{ commit_oid: 'a'.repeat(40), title: 'Batch', kind: 'batch', decision: 'pending' }] };
+  vm.runInContext('current = fixture; renderReview();', ui.context);
+  const heading = ui.get('#app').children[1].children[0].children[1].children[0];
+  assert.equal(heading.children[1].textContent, '（无提交标题）');
+  assert.equal(heading.title, 'a'.repeat(40) + '\n（无提交说明）');
 });

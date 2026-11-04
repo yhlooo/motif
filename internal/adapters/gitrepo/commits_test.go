@@ -10,7 +10,7 @@ import (
 	"github.com/yhlooo/motif/internal/adapters/gitrepo"
 )
 
-func TestCommitTitlesExplicitOIDs(t *testing.T) {
+func TestCommitMessagesExplicitOIDs(t *testing.T) {
 	root := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
@@ -33,18 +33,18 @@ func TestCommitTitlesExplicitOIDs(t *testing.T) {
 	git("commit", "--allow-empty", "--allow-empty-message", "-m", "")
 	empty := git("rev-parse", "HEAD")
 	r := &gitrepo.Repository{Root: root}
-	titles, err := r.CommitTitles(context.Background(), []string{second, empty, first, first})
-	if err != nil || len(titles) != 3 || titles[first] != "第一项：<script> & 标题" || titles[second] != "second" || titles[empty] != "" {
-		t.Fatalf("unexpected titles: %v, %v", titles, err)
+	messages, err := r.CommitMessages(context.Background(), []string{second, empty, first, first})
+	if err != nil || len(messages) != 3 || messages[first] != "第一项：<script> & 标题\n\nbody must not become the title\n" || messages[second] != "second\n" || messages[empty] != "" {
+		t.Fatalf("unexpected messages: %v, %v", messages, err)
 	}
 	if r.ReadStats().GitCalls != 1 {
 		t.Fatal("metadata was not read in a batch")
 	}
-	if _, err := r.CommitTitles(context.Background(), []string{"HEAD"}); err == nil {
+	if _, err := r.CommitMessages(context.Background(), []string{"HEAD"}); err == nil {
 		t.Fatal("mutable revision accepted")
 	}
 	before := r.ReadStats().GitCalls
-	if titles, err := r.CommitTitles(context.Background(), nil); err != nil || len(titles) != 0 || r.ReadStats().GitCalls != before {
-		t.Fatal("empty request must not read HEAD", titles, err)
+	if messages, err := r.CommitMessages(context.Background(), nil); err != nil || len(messages) != 0 || r.ReadStats().GitCalls != before {
+		t.Fatal("empty request must not read HEAD", messages, err)
 	}
 }

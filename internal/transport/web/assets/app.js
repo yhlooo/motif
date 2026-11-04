@@ -46,13 +46,17 @@ function renderReview() {
     if (!group || item.commit_oid !== previousCommit) {
       group = el('section', 'commit-group');
       const heading = el('h3', 'commit-heading'), oid = item.commit_oid || '';
-      const title = current.commit_titles?.[oid] ?? '提交标题不可用';
+      const message = current.commit_messages?.[oid];
+      const title = message === undefined ? (current.commit_titles?.[oid] ?? '提交标题不可用') : message.split(/\r?\n/, 1)[0];
       heading.append(el('code', '', oid ? oid.slice(0, 12) : '未归属提交'), el('span', '', oid ? (title || '（无提交标题）') : '未记录所属 commit'));
-      heading.title = oid ? `${oid}\n${title}` : '未记录所属 commit';
+      heading.title = oid ? `${oid}\n${message === undefined ? title : (message || '（无提交说明）')}` : '未记录所属 commit';
       group.append(heading); sidebar.append(group); previousCommit = item.commit_oid;
     }
     const b = el('button', 'item' + (index >= first && index <= last ? ' selected' : '')); b.type = 'button'; b.dataset.index = index;
-    b.append(el('span', 'number', `${String(index + 1).padStart(2, '0')} / ${item.kind}`), el('strong', '', item.title), el('br'), badge(item.decision));
+    const meta = el('span', 'item-meta'), lines = item.title.split(/\r?\n/);
+    meta.append(el('span', 'number', String(index + 1).padStart(2, '0')), badge(item.decision));
+    b.title = item.title;
+    b.append(meta, el('strong', 'item-title', lines[0] + (lines.length > 1 ? '…' : '')));
     b.onclick = safe(async event => { if (event.shiftKey) { first = Math.min(anchor, index); last = Math.max(anchor, index); } else { first = last = anchor = index; } selectedLine = null; renderReview(); await renderSelection(); }); group.append(b);
   }); workspace.append(sidebar, content); app.append(top, workspace);
 }
