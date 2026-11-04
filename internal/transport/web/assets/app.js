@@ -10,7 +10,7 @@ async function api(path, method = 'GET', body) {
   $('#error').hidden = true;
   const response = await fetch('/api/' + path, { method, headers: { 'Content-Type': 'application/json', 'X-Motif-Token': token }, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await response.json().catch(() => ({ error: '服务返回了无效响应' }));
-  if (!response.ok) { if(response.status === 409) data.error = '审查内容已更新，请刷新后重试。'; throw new Error(data.error || '请求失败'); } return data;
+  if (!response.ok) { if(response.status === 409 && !data.code) data.error = '审查内容已更新，请刷新后重试。'; const e = new Error(data.error || '请求失败'); e.code = data.code; throw e; } return data;
 }
 function badge(state) { return el('span', 'badge ' + state, labels[state] || state); }
 function button(text, fn, cls) { const b = el('button', cls, text); b.type = 'button'; b.onclick = safe(fn); return b; }
@@ -114,14 +114,54 @@ function renderThreads(firstId, lastId) {
     box.append(text, button('回复', async () => { if (!text.value.trim()) throw new Error('请输入回复内容'); await api(`comment-threads/${thread.id}/replies`, 'POST', { body: text.value, view_version: current.view_version }); await renderSelection(); })); root.append(box);
   }); $('#content').append(root);
 }
-$('#new-review').onclick = () => { preview = null; $('#preview').textContent = ''; $('#create-button').disabled = true; $('#create-dialog').showModal(); };
-$('#cancel-create').onclick = () => $('#create-dialog').close();
-$('#create-form').oninput = () => { preview = null; $('#create-button').disabled = true; $('#preview').textContent = ''; };
-$('#preview-button').onclick = safe(async () => {
-  const form = $('#create-form'); preview = await api('code-reviews/preview', 'POST', { source: form.elements.source.value, target: form.elements.target.value });
-  $('#preview').textContent = `基准 ${preview.base.slice(0, 12)} → ${preview.head.slice(0, 12)}\n${preview.commits.length} 个提交 · ${preview.diff.length} 个变更文件`; $('#create-button').disabled = false;
+let previewGeneration = 0, creatingReview = false;
+const createForm = $('#create-form'), createDialog = $('#create-dialog');
+function updateCreateButton() {
+  $('#create-button').disabled = creatingReview || !preview || !createForm.elements.title.value.trim();
+}
+async function previewRange(notice = '') {
+  const request = ++previewGeneration;
+  preview = null; updateCreateButton();
+  const source = createForm.elements.source.value, target = createForm.elements.target.value;
+  if (!source || !target) { $('#preview').textContent = '请选择源分支和目标分支。'; return; }
+  $('#preview').textContent = '正在计算审查范围…';
+  try {
+    const result = await api('code-reviews/preview', 'POST', { source, target });
+    if (request !== previewGeneration || !createDialog.open) return;
+    preview = result;
+    $('#preview').textContent = notice + `基准 ${preview.base.slice(0, 12)} → ${preview.head.slice(0, 12)}\n${preview.commits.length} 个提交 · ${preview.diff.length} 个变更文件`;
+  } catch (e) {
+    if (request !== previewGeneration || !createDialog.open) return;
+    $('#preview').replaceChildren(el('span', '', '无法计算审查范围：' + e.message + ' '), button('重试', () => previewRange(notice), 'secondary'));
+  }
+  updateCreateButton();
+}
+$('#new-review').onclick = () => { createDialog.showModal(); previewRange(); };
+$('#cancel-create').onclick = () => createDialog.close();
+createDialog.onclose = () => { ++previewGeneration; preview = null; updateCreateButton(); };
+createForm.elements.title.oninput = updateCreateButton;
+for (const field of ['source', 'target']) createForm.elements[field].onchange = () => previewRange();
+createForm.onsubmit = safe(async event => {
+  event.preventDefault();
+  if (!preview || creatingReview || !createForm.elements.title.value.trim()) return;
+  creatingReview = true; updateCreateButton();
+  for (const field of ['source', 'target', 'title']) createForm.elements[field].disabled = true;
+  $('#new-review').disabled = true;
+  try {
+    let r;
+    try { r = await api('code-reviews', 'POST', { title: createForm.elements.title.value, preview }); }
+    catch (e) {
+      if (e.code !== 'branches_changed') throw e;
+      if (createDialog.open) await previewRange('分支已变化，范围已更新，请确认后再次创建。\n');
+      return;
+    }
+    createDialog.close(); await openReview(r.id);
+  } finally {
+    creatingReview = false;
+    for (const field of ['source', 'target', 'title']) createForm.elements[field].disabled = false;
+    $('#new-review').disabled = false; updateCreateButton();
+  }
 });
-$('#create-form').onsubmit = safe(async event => { event.preventDefault(); if (!preview) return; const b = $('#create-button'); b.disabled = true; try { const r = await api('code-reviews', 'POST', { title: $('#create-form').elements.title.value, preview }); $('#create-dialog').close(); await openReview(r.id); } finally { b.disabled = !preview; } });
 $('#filter').onchange = safe(listReviews);
 safe(async () => {
   const data = await api('bootstrap'); token = data.token; $('#repository').textContent = data.repository;

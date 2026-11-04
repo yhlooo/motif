@@ -149,6 +149,15 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	}
 	git("add", ".")
 	git("commit", "-m", "advance source")
+	// Creation rejects an outdated preview with a code the UI can use to
+	// refresh the range without automatically creating a different review.
+	rec = call("POST", "/api/code-reviews", map[string]any{"title": "Stale review", "preview": p})
+	var conflict struct {
+		Code string `json:"code"`
+	}
+	if rec.Code != http.StatusConflict || json.Unmarshal(rec.Body.Bytes(), &conflict) != nil || conflict.Code != "branches_changed" {
+		t.Fatal("stale creation did not identify changed branches", rec.Body.String())
+	}
 	rec = call("GET", prefix, nil)
 	var published domain.Review
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &published) != nil || published.Version != cr.Version {

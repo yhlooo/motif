@@ -107,6 +107,12 @@ func send(w http.ResponseWriter, v any) {
 }
 func fail(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
+	if errors.Is(err, review.ErrBranchesChanged) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "code": "branches_changed"})
+		return
+	}
 	if errors.Is(err, sqlite.ErrStaleView) {
 		status = http.StatusConflict
 	}
