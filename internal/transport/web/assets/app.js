@@ -114,10 +114,16 @@ function renderThreads(firstId, lastId) {
     box.append(text, button('回复', async () => { if (!text.value.trim()) throw new Error('请输入回复内容'); await api(`comment-threads/${thread.id}/replies`, 'POST', { body: text.value, view_version: current.view_version }); await renderSelection(); })); root.append(box);
   }); $('#content').append(root);
 }
-let previewGeneration = 0, creatingReview = false;
+let previewGeneration = 0, creatingReview = false, titleTouched = false;
 const createForm = $('#create-form'), createDialog = $('#create-dialog');
 function updateCreateButton() {
   $('#create-button').disabled = creatingReview || !preview || !createForm.elements.title.value.trim();
+}
+function validateTitle() {
+  const invalid = titleTouched && !createForm.elements.title.value.trim();
+  createForm.elements.title.setAttribute('aria-invalid', String(invalid));
+  $('#title-error').hidden = !invalid;
+  updateCreateButton();
 }
 async function previewRange(notice = '') {
   const request = ++previewGeneration;
@@ -136,10 +142,11 @@ async function previewRange(notice = '') {
   }
   updateCreateButton();
 }
-$('#new-review').onclick = () => { createDialog.showModal(); previewRange(); };
+$('#new-review').onclick = () => { titleTouched = false; validateTitle(); createDialog.showModal(); createForm.elements.title.focus(); previewRange(); };
 $('#cancel-create').onclick = () => createDialog.close();
 createDialog.onclose = () => { ++previewGeneration; preview = null; updateCreateButton(); };
-createForm.elements.title.oninput = updateCreateButton;
+createForm.elements.title.onblur = () => { titleTouched = true; validateTitle(); };
+createForm.elements.title.oninput = validateTitle;
 for (const field of ['source', 'target']) createForm.elements[field].onchange = () => previewRange();
 createForm.onsubmit = safe(async event => {
   event.preventDefault();
