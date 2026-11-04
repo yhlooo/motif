@@ -146,6 +146,8 @@ type Review struct {
 	Warning        string       `json:"warning,omitempty"`
 	Commits        []string     `json:"commits"`
 	Items          []ReviewItem `json:"items"`
+
+	CommitTitles map[string]string `json:"commit_titles,omitempty"`
 }
 type ReviewItem struct {
 	DecisionRevision  int64    `json:"decision_revision"`

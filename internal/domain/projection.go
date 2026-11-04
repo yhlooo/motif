@@ -169,6 +169,7 @@ func AssembleProjection(in ProjectionInput) (Review, error) {
 		Commits, Items             []string
 		History, Warning           string
 		Diagnostics                []Diagnostic
-	}{r.SourceOID, r.TargetOID, r.Base, r.Head, r.Commits, identities, r.History, r.Warning, r.Diagnostics})
+		CommitTitles               map[string]string
+	}{r.SourceOID, r.TargetOID, r.Base, r.Head, r.Commits, identities, r.History, r.Warning, r.Diagnostics, r.CommitTitles})
 	return r, nil
 }

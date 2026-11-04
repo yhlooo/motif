@@ -534,6 +534,9 @@ func TestMergeOnlyRangeStillReviewsFinalChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if r.CommitTitles[r.Head] != "merge with unique edit" {
+		t.Fatal("merge-only item has no commit title", r.CommitTitles)
+	}
 	if len(r.Items) != 1 || r.Items[0].Kind != "integrity_unknown" || r.Status != "in_review" {
 		t.Fatal("merge-only delta was lost", r)
 	}
@@ -653,5 +656,26 @@ func BenchmarkReviewRefresh(b *testing.B) {
 				}
 			})
 		})
+	}
+}
+
+func TestRefreshBackfillsCommitTitlesAndPreservesDecisions(t *testing.T) {
+	f := setup(t)
+	f.edit("edit", "file.txt", "zero\nnew\n")
+	commit := f.commit()
+	cr := f.create()
+	if err := f.s.Decision(f.ctx, f.w.RepositoryID, cr.ID, cr.Items[0].ID, "approved", cr.Version); err != nil {
+		t.Fatal(err)
+	}
+	// Model an older published payload with no persisted title metadata.
+	cr.CommitTitles = nil
+	cr.InputSignature = "legacy-algorithm"
+	cr.ViewDigest = "legacy-payload"
+	if err := f.s.PublishReview(f.ctx, f.w, &cr, cr.Version); err != nil {
+		t.Fatal(err)
+	}
+	updated := f.refresh(cr.ID)
+	if updated.CommitTitles[commit] != "change" || updated.Items[0].ID != cr.Items[0].ID || updated.Items[0].Decision != "approved" {
+		t.Fatalf("metadata backfill lost title or decision: %+v", updated)
 	}
 }

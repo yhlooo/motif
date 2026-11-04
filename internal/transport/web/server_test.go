@@ -109,6 +109,9 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &cr) != nil {
 		t.Fatal(rec.Body.String())
 	}
+	if cr.CommitTitles[p.SourceOID] != "change" {
+		t.Fatal("commit title missing from API", cr.CommitTitles)
+	}
 	item := cr.Items[0].ID
 	prefix := "/api/code-reviews/" + cr.ID
 	rec = call("GET", prefix+"/diff?first="+item+"&last="+item, nil)
@@ -195,6 +198,13 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte("+second")) || bytes.Contains(rec.Body.Bytes(), []byte("+third")) {
 		t.Fatal("old projection was overwritten", rec.Body.String())
 	}
+	if refreshed.CommitTitles[p.SourceOID] != "change" || refreshed.CommitTitles[refreshed.SourceOID] != "advance source" {
+		t.Fatal("refreshed commit titles missing", refreshed.CommitTitles)
+	}
+	var historical domain.Review
+	if rec := call("GET", prefix+"?projection_id="+cr.ProjectionID, nil); rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &historical) != nil || historical.CommitTitles[p.SourceOID] != "change" {
+		t.Fatal("historical commit title missing", rec.Body.String())
+	}
 	// Deleting both tracking branches only prevents updates, never reading or
 	// reviewing the last published commit range.
 	git("switch", "--detach")
@@ -202,6 +212,11 @@ func TestReviewAPICommentsAndLocalRequestProtection(t *testing.T) {
 	rec = call("POST", prefix+"/refresh", nil)
 	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte(`"updated":false`)) {
 		t.Fatal("missing branch", rec.Body.String())
+	}
+	rec = call("GET", prefix, nil)
+	var savedTitles domain.Review
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &savedTitles) != nil || savedTitles.CommitTitles[refreshed.SourceOID] != "advance source" {
+		t.Fatal("deleted branches lost commit titles", rec.Body.String())
 	}
 	for _, path := range []string{"/api/code-reviews", prefix, prefix + "/diff?first=" + refreshed.Items[0].ID + "&last=" + refreshed.Items[0].ID, prefix + "/threads"} {
 		rec = call("GET", path, nil)

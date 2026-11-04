@@ -5,7 +5,7 @@ const vm = require('node:vm');
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function element() {
-  return { value: '', textContent: '', disabled: false, open: false, children: [],
+  return { dataset: {}, value: '', textContent: '', disabled: false, open: false, children: [],
     append(...items) { this.children.push(...items); },
     replaceChildren(...items) { this.children = items; },
     attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, focus() { this.focused = true; }, showModal() { this.open = true; },
@@ -112,4 +112,31 @@ test('title receives focus and shows an accessible error only after an empty blu
   assert.equal(ui.get('#title-error').hidden, false);
   ui.get('#cancel-create').onclick(); ui.get('#new-review').onclick();
   assert.equal(ui.get('#title-error').hidden, true);
+});
+
+test('sidebar sections show commit metadata and preserve global selection across sections', async () => {
+  const ui = await setup();
+  ui.context.fixture = { id: 'review', title: 'Review', status: 'in_review', created: 0,
+    target_oid: '0'.repeat(40), source_oid: 'b'.repeat(40), commits: ['a'.repeat(40), 'b'.repeat(40)],
+    commit_titles: { ['a'.repeat(40)]: 'First <script> commit', ['b'.repeat(40)]: 'Second commit' },
+    items: ['a', 'a', 'b'].map((c, index) => ({ id: String(index), commit_oid: c.repeat(40), title: 'Batch ' + index, kind: 'batch', decision: 'pending' })) };
+  vm.runInContext('current = fixture; renderReview(); renderSelection = async () => {};', ui.context);
+  let sidebar = ui.get('#app').children[1].children[0];
+  assert.equal(sidebar.children.length, 3);
+  const [firstGroup, secondGroup] = sidebar.children.slice(1);
+  assert.equal(firstGroup.children.length, 3);
+  assert.equal(secondGroup.children.length, 2);
+  assert.equal(firstGroup.children[0].children[0].textContent, 'a'.repeat(12));
+  assert.equal(firstGroup.children[0].children[1].textContent, 'First <script> commit');
+  assert.equal(secondGroup.children[0].children[1].textContent, 'Second commit');
+  await secondGroup.children[1].onclick({ shiftKey: true });
+  assert.equal(vm.runInContext('first', ui.context), 0);
+  assert.equal(vm.runInContext('last', ui.context), 2);
+  sidebar = ui.get('#app').children[1].children[0];
+  assert.ok(sidebar.children.slice(1).flatMap(group => group.children.slice(1)).every(b => b.className.includes('selected')));
+  await sidebar.children[1].children[2].onclick({ shiftKey: false });
+  assert.equal(vm.runInContext('first', ui.context), 1);
+  assert.equal(vm.runInContext('last', ui.context), 1);
+  vm.runInContext('delete current.commit_titles; renderReview();', ui.context);
+  assert.equal(ui.get('#app').children[1].children[0].children[1].children[0].children[1].textContent, '提交标题不可用');
 });
