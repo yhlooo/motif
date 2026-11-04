@@ -3,7 +3,7 @@ const $ = s => document.querySelector(s);
 const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
 const labels = { pending: '待审查', approved: '已批准', rejected: '要求修改', in_review: '审查中', changes_requested: '要求修改' };
 let token = '', preview = null, current = null, anchor = 0, first = 0, last = 0, generation = 0, selectedLine = null, threadList = [];
-const app = $('#app');
+const app = $('#app'), newReviewButton = $('#new-review');
 function error(e) { $('#error').hidden = false; $('#error').textContent = e.message || String(e); }
 function safe(fn) { return (...args) => { try { return Promise.resolve(fn(...args)).catch(error); } catch (e) { error(e); } }; }
 async function api(path, method = 'GET', body) {
@@ -141,7 +141,7 @@ async function previewRange(notice = '') {
   }
   updateCreateButton();
 }
-$('#new-review').onclick = () => { titleTouched = false; validateTitle(); createDialog.showModal(); createForm.elements.title.focus(); previewRange(); };
+newReviewButton.onclick = () => { titleTouched = false; validateTitle(); createDialog.showModal(); createForm.elements.title.focus(); previewRange(); };
 $('#cancel-create').onclick = () => createDialog.close();
 createDialog.onclose = () => { ++previewGeneration; preview = null; updateCreateButton(); };
 createForm.elements.title.onblur = () => { titleTouched = true; validateTitle(); };
@@ -152,7 +152,7 @@ createForm.onsubmit = safe(async event => {
   if (!preview || creatingReview || !createForm.elements.title.value.trim()) return;
   creatingReview = true; updateCreateButton();
   for (const field of ['source', 'target', 'title']) createForm.elements[field].disabled = true;
-  $('#new-review').disabled = true;
+  newReviewButton.disabled = true;
   try {
     let r;
     try { r = await api('code-reviews', 'POST', { title: createForm.elements.title.value, preview }); }
@@ -165,7 +165,7 @@ createForm.onsubmit = safe(async event => {
   } finally {
     creatingReview = false;
     for (const field of ['source', 'target', 'title']) createForm.elements[field].disabled = false;
-    $('#new-review').disabled = false; updateCreateButton();
+    newReviewButton.disabled = false; updateCreateButton();
   }
 });
 $('#filter').onchange = safe(listReviews);
