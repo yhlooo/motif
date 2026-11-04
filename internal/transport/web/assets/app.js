@@ -36,7 +36,6 @@ async function openReview(id) {
 function renderReview() {
   app.replaceChildren(); const top = el('section', 'review-top'), row = el('div', 'row');
   const back = el('a', '', '← 全部审查'); back.href = '/'; row.append(back, badge(current.status));
-  row.append(button('刷新审查', () => openReview(current.id), 'secondary'));
   if(current.refresh && current.refresh.code && current.refresh.code !== 'ok') top.append(el('p','description', `更新失败：${current.refresh.message}。以下内容及审阅操作针对已保存的 commit 范围。`));
   const range = el('div','muted', `范围 ${current.target_oid.slice(0,12)} → ${current.source_oid.slice(0,12)}`); range.title = `${current.target_oid} → ${current.source_oid}`;
   top.append(row, range, el('h1', '', current.title), el('div', 'muted', `${current.source} → ${current.target} · ${current.commits.length} 个提交 · ${date(current.created)}`), el('p', '', current.warning));
