@@ -5,10 +5,10 @@ const vm = require('node:vm');
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function element() {
-  return { dataset: {}, value: '', textContent: '', disabled: false, open: false, children: [],
+  return { style: {}, dataset: {}, value: '', textContent: '', disabled: false, open: false, children: [],
     append(...items) { this.children.push(...items); },
     replaceChildren(...items) { this.children = items; },
-    attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, focus() { this.focused = true; }, showModal() { this.open = true; },
+    attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, removeAttribute(name) { delete this.attributes[name]; }, focus() { this.focused = true; }, showModal() { this.open = true; },
     close() { this.open = false; this.onclose?.(); } };
 }
 async function setup() {
@@ -17,7 +17,7 @@ async function setup() {
   get('#create-form').elements = Object.fromEntries(['source', 'target', 'title'].map(key => [key, element()]));
   const pending = [], creates = [];
   const response = (body, ok = true, status = 200) => ({ ok, status, json: async () => body });
-  const context = vm.createContext({ document: { querySelector: get, createElement: element }, location: { hash: '' },
+  const context = vm.createContext({ atob, TextDecoder, document: { querySelector: get, createElement: element }, location: { hash: '' },
     fetch: async (path, options) => {
       if (path === '/api/bootstrap') return response({ token: 'token', repository: 'repo', branches: ['feature', 'main', 'other'] });
       if (path.endsWith('/preview')) return new Promise(resolve => pending.push({ body: JSON.parse(options.body), resolve: (body, ok = true) => resolve(response(body, ok, ok ? 200 : 400)) }));
@@ -158,4 +158,62 @@ test('empty commit message shows a placeholder and still renders a hover hint', 
   const heading = ui.get('#app').children[1].children[0].children[1].children[0];
   assert.equal(heading.children[1].textContent, '（无提交标题）');
   assert.equal(heading.title, 'a'.repeat(40) + '\n（无提交说明）');
+});
+
+const patch = (body, path = 'file.txt') => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,2 +1,3 @@\n${body}\n`;
+test('diff tree counts hunk lines and aggregates nested directories without counting headers', async () => {
+  const ui = await setup();
+  ui.context.files = [
+    {path:'src/a.js',patch:patch('-old\n+new\n+++literal\n context\n\\ No newline at end of file')},
+    {path:'src/nested/b.js',patch:'@@ -0,0 +1 @@\n+added\n@@ -4 +5,0 @@\n-deleted\n'},
+    {path:'README.md',patch:patch(' context')},
+    {path:'asset.png',binary:true,patch:'Binary contents differ\n'},
+    {path:'hidden.txt',old:{out_of_scope:true},patch:'Capture scope changed'},
+  ];
+  const tree = vm.runInContext('buildDiffTree(files)', ui.context);
+  assert.equal(tree.added, 3); assert.equal(tree.removed, 2);
+  assert.equal(tree.binary, 1); assert.equal(tree.unavailable, 1);
+  const src = tree.children.get('dir:src');
+  assert.equal(src.added, 3); assert.equal(src.removed, 2);
+  assert.equal(src.children.get('file:a.js').added, 2);
+  assert.equal(src.children.get('dir:nested').children.get('file:b.js').removed, 1);
+  assert.equal(tree.children.get('file:README.md').added, 0);
+  assert.match(vm.runInContext('diffStatsLabel(buildDiffTree(files))', ui.context), /二进制文件/);
+});
+test('file tree defaults open, keeps file identities and supports jumping to the original diff order', async () => {
+  const ui = await setup();
+  const paths = ['z.txt','src/b.js','src/a.js','src'];
+  ui.context.files = paths.map(path => ({path, path_base64:Buffer.from(path).toString('base64'), patch:patch('+new\n-old')}));
+  const targets = paths.map(() => ({scrollIntoView(options){this.scrolled=options.block;},focus(){this.focused=true;}}));
+  ui.context.targets = targets;
+  const nav = vm.runInContext('renderDiffTree(files, targets)', ui.context);
+  const list = nav.children[1], details = list.children[0].children[0];
+  assert.equal(details.open, true);
+  const summary = details.children[0];
+  assert.equal(summary.children[2].textContent, 'src');
+  assert.equal(summary.children[3].children[0].textContent, '+2');
+  assert.equal(summary.children[3].children[1].textContent, '−2');
+  const fileA = details.children[1].children[0].children[0];
+  const fileB = details.children[1].children[1].children[0];
+  assert.equal(fileA.children[2].textContent, 'a.js');
+  fileA.onclick(); assert.equal(targets[2].scrolled, 'start'); assert.equal(targets[2].focused, true);
+  assert.equal(fileA.attributes['aria-current'], 'true');
+  fileB.onclick(); assert.equal(fileA.attributes['aria-current'], undefined);
+  assert.equal(fileB.attributes['aria-current'], 'true');
+  assert.equal(list.children.length, 3); // src directory and deleted src file coexist.
+});
+test('file tree groups raw path segments and does not merge invalid UTF-8 names', async () => {
+  const ui = await setup();
+  const encoded = bytes => Buffer.from(bytes).toString('base64');
+  ui.context.files = [
+    {path:'display one',path_base64:encoded([115,47,255]),patch:patch('+one')},
+    {path:'display two',path_base64:encoded([115,47,254]),patch:patch('-two')},
+    {path:'中文/文件.js',path_base64:Buffer.from('中文/文件.js').toString('base64'),patch:patch('+new')}
+  ];
+  const tree = vm.runInContext('buildDiffTree(files)',ui.context);
+  assert.equal(tree.children.get('dir:s').children.size,2);
+  assert.equal(tree.children.get('dir:s').added,1);
+  assert.equal(tree.children.get('dir:s').removed,1);
+  assert.equal([...tree.children.get('dir:s').children.values()][0].name, String.fromCharCode(92)+'xff');
+  assert.equal([...tree.children.values()].find(n=>n.name==='中文').children.size,1);
 });

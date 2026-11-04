@@ -34,6 +34,7 @@ async function openReview(id) {
   current = await api('code-reviews/' + id); first = last = anchor = 0; history.replaceState(null, '', '#review=' + id); renderReview(); await renderSelection(); if(refreshError) error(refreshError);
 }
 function renderReview() {
+  const sidebarScrollTop = $('.sidebar')?.scrollTop || 0;
   app.replaceChildren(); const top = el('section', 'review-top'), row = el('div', 'row');
   const back = el('a', '', '← 全部审查'); back.href = '/'; row.append(back, badge(current.status));
   if(current.refresh && current.refresh.code && current.refresh.code !== 'ok') top.append(el('p','description', `更新失败：${current.refresh.message}。以下内容及审阅操作针对已保存的 commit 范围。`));
@@ -58,7 +59,97 @@ function renderReview() {
     b.title = item.title;
     b.append(meta, el('strong', 'item-title', lines[0] + (lines.length > 1 ? '…' : '')));
     b.onclick = safe(async event => { if (event.shiftKey) { first = Math.min(anchor, index); last = Math.max(anchor, index); } else { first = last = anchor = index; } selectedLine = null; renderReview(); await renderSelection(); }); group.append(b);
-  }); workspace.append(sidebar, content); app.append(top, workspace);
+  }); workspace.append(sidebar, content); app.append(top, workspace); sidebar.scrollTop = sidebarScrollTop;
+}
+function diffLineStats(file) {
+  const stats = { added: 0, removed: 0, binary: file.binary ? 1 : 0, unavailable: file.old?.out_of_scope || file.new?.out_of_scope ? 1 : 0 };
+  if (stats.binary || stats.unavailable) return stats;
+  let inside = false;
+  for (const line of file.patch.split('\n')) {
+    if (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line)) { inside = true; continue; }
+    if (line.startsWith('diff --git ')) { inside = false; continue; }
+    if (!inside) continue;
+    if (line.startsWith('+')) stats.added++;
+    else if (line.startsWith('-')) stats.removed++;
+  }
+  return stats;
+}
+function diffPathParts(file) {
+  if (!file.path_base64) return file.path.split('/').map(name => ({ key: name, name }));
+  return atob(file.path_base64).split('/').map(key => {
+    const bytes = Uint8Array.from(key, c => c.charCodeAt(0));
+    let name;
+    try { name = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch { name = Array.from(bytes, b => b >= 32 && b < 127 ? String.fromCharCode(b) : '\\x' + b.toString(16).padStart(2, '0')).join(''); }
+    return { key, name };
+  });
+}
+function buildDiffTree(diffs) {
+  const makeNode = (name, directory) => ({ name, children: directory ? new Map() : null, added: 0, removed: 0, binary: 0, unavailable: 0 });
+  const root = makeNode('', true);
+  diffs.forEach((file, index) => {
+    const stats = diffLineStats(file), parts = diffPathParts(file);
+    let node = root;
+    for (let i = 0; i < parts.length; i++) {
+      for (const key of ['added', 'removed', 'binary', 'unavailable']) node[key] += stats[key];
+      const directory = i < parts.length - 1, key = (directory ? 'dir:' : 'file:') + parts[i].key;
+      if (!node.children.has(key)) node.children.set(key, makeNode(parts[i].name, directory));
+      node = node.children.get(key);
+    }
+    Object.assign(node, stats, { index, path: file.path });
+  });
+  return root;
+}
+function diffStatsLabel(stats) {
+  let label = `新增 ${stats.added} 行，删除 ${stats.removed} 行`;
+  if (stats.binary) label += `；含 ${stats.binary} 个二进制文件，不计文本行数`;
+  if (stats.unavailable) label += `；${stats.unavailable} 个文件内容未采集，不计文本行数`;
+  return label;
+}
+function renderDiffStats(stats) {
+  const counts = el('span', 'file-tree-stats');
+  counts.title = diffStatsLabel(stats); counts.setAttribute('aria-label', counts.title);
+  counts.append(el('span', 'diff-added-count', '+' + stats.added), el('span', 'diff-removed-count', '−' + stats.removed));
+  if (stats.binary || stats.unavailable) counts.append(el('span', 'diff-count-note', '*'));
+  return counts;
+}
+function renderDiffTree(diffs, targets) {
+  const tree = buildDiffTree(diffs), nav = el('nav', 'file-tree');
+  nav.setAttribute('aria-label', 'Diff 文件树');
+  const heading = el('div', 'file-tree-heading');
+  heading.append(el('strong', '', `变更文件 (${diffs.length})`), renderDiffStats(tree)); nav.append(heading);
+  const fileButtons = [];
+  function renderNodes(parent, depth) {
+    const list = el('ul', 'file-tree-list');
+    const nodes = [...parent.children.values()].sort((a, b) => Number(!!b.children) - Number(!!a.children) || a.name.localeCompare(b.name));
+    for (const node of nodes) {
+      const li = el('li'), directory = !!node.children;
+      const row = el(directory ? 'summary' : 'button', 'file-tree-row');
+      row.style.paddingLeft = `${8 + Math.min(depth, 6) * 12}px`;
+      row.title = (node.path || node.name) + '\n' + diffStatsLabel(node);
+      const chevron = el('span', 'file-tree-chevron' + (directory ? '' : ' spacer'));
+      const icon = el('span', directory ? 'tree-folder-icon' : 'tree-file-icon');
+      chevron.setAttribute('aria-hidden', 'true'); icon.setAttribute('aria-hidden', 'true');
+      row.append(chevron, icon, el('span', 'file-tree-name', node.name), renderDiffStats(node));
+      if (directory) {
+        const details = el('details', 'file-tree-directory'); details.open = true;
+        details.append(row, renderNodes(node, depth + 1)); li.append(details);
+      } else {
+        row.type = 'button'; fileButtons.push(row);
+        row.onclick = () => {
+          fileButtons.forEach(b => b.removeAttribute('aria-current'));
+          row.setAttribute('aria-current', 'true');
+          targets[node.index].scrollIntoView({ block: 'start' });
+          targets[node.index].focus({ preventScroll: true });
+        };
+        li.append(row);
+      }
+      list.append(li);
+    }
+    return list;
+  }
+  nav.append(renderNodes(tree, 0));
+  return nav;
 }
 async function renderSelection() {
   if (!current.items.length) { $('#content').replaceChildren(el('div','empty','当前源/目标分支之间没有待审阅修改。')); return; }
@@ -84,8 +175,9 @@ async function renderSelection() {
   root.append(el('p', 'muted', '点击行号添加评论；Shift 点击同一侧的另一行选择行范围。'));
   const composer = el('div'); composer.id = 'composer'; root.append(composer);
   if (!diffs.length) root.append(el('div', 'empty', '所选修改互相抵消，净差异为空。原始事件仍可追溯。'));
+  const diffLayout = el('div', 'diff-layout'), diffFiles = el('div', 'diff-files'), fileTargets = [];
   diffs.forEach(file => {
-    const box = el('section', 'file'), code = el('div', 'diff'); box.append(el('div', 'file-title', file.path), code);
+    const box = el('section', 'file'), code = el('div', 'diff'); box.append(el('div', 'file-title', file.path), code); box.tabIndex = -1; fileTargets.push(box);
     let old = 0, newer = 0, inside = false;
     file.patch.split('\n').forEach(line => {
       const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
@@ -102,8 +194,9 @@ async function renderSelection() {
           showComposer(firstId, lastId);
         }; row.append(b);
       } row.append(el('span', 'code', line)); code.append(row);
-    }); root.append(box);
+    }); diffFiles.append(box);
   });
+  if (diffs.length) { diffLayout.append(diffFiles, renderDiffTree(diffs, fileTargets)); root.append(diffLayout); }
   renderThreads(firstId, lastId);
 }
 function showComposer(firstId, lastId) {
