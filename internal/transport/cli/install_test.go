@@ -10,6 +10,36 @@ import (
 	"testing"
 )
 
+func TestInstallPreviewRequiresConfirmationWithoutTerminal(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("MOTIF_DATA_DIR", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	if raw, err := exec.Command("git", "init").CombinedOutput(); err != nil {
+		t.Fatalf("%s: %v", raw, err)
+	}
+	cmd := cli.NewCommand("motif")
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetIn(strings.NewReader("Y\n"))
+	cmd.SetArgs([]string{"install", "--agent", "codebuddy"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Files to change:") || !strings.Contains(output.String(), "settings.local.json") {
+		t.Fatal(output.String())
+	}
+	if strings.Contains(output.String(), "\x1b[") {
+		t.Fatal("terminal controls in redirected output")
+	}
+	if _, err = os.Stat(filepath.Join(root, ".codebuddy")); !os.IsNotExist(err) {
+		t.Fatal("unconfirmed install wrote configuration", err)
+	}
+}
+
 func TestInstallWarnsBeforeRequiringLocalOverrideConfirmation(t *testing.T) {
 	for _, yes := range []bool{false, true} {
 		t.Run(map[bool]string{false: "unconfirmed", true: "confirmed"}[yes], func(t *testing.T) {
@@ -101,13 +131,13 @@ func TestClaudeCLIInstallDoctorAndSelectiveUninstall(t *testing.T) {
 		}
 		return out.String()
 	}
-	if out := run("install", "--agent", "claude"); !strings.Contains(out, "claude: installed") {
+	if out := run("install", "--agent", "claude", "--yes"); !strings.Contains(out, "claude: installed") {
 		t.Fatal(out)
 	}
 	if out := run("doctor"); !strings.Contains(out, `"claude"`) || !strings.Contains(out, `"unavailable"`) {
 		t.Fatal(out)
 	}
-	run("install", "--agent", "codex")
+	run("install", "--agent", "codex", "--yes")
 	run("uninstall", "--agent", "claude", "-y")
 	if _, err = os.Stat(filepath.Join(root, ".claude", "settings.local.json")); !os.IsNotExist(err) {
 		t.Fatal(err)

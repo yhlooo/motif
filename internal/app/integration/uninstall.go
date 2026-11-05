@@ -21,15 +21,19 @@ func RemovalPlan(m Manifest, agents []string) Manifest {
 	remove.Config = File{}
 	remove.ConfigCreated = false
 	remove.Claude = nil
+	remove.CodeBuddy = nil
 	for _, agent := range agents {
 		if agent == "codex" {
 			remove.Config, remove.ConfigCreated = m.Config, m.ConfigCreated
+		}
+		if agent == "codebuddy" {
+			remove.CodeBuddy = m.CodeBuddy
 		}
 		if agent == "claude" {
 			remove.Claude = m.Claude
 		}
 	}
-	if (m.Config.Path != "" && remove.Config.Path == "") || (m.Claude != nil && remove.Claude == nil) {
+	if (m.Config.Path != "" && remove.Config.Path == "") || (m.Claude != nil && remove.Claude == nil) || (m.CodeBuddy != nil && remove.CodeBuddy == nil) {
 		remove.Hooks = nil
 		remove.OwnerFile = ""
 		remove.LocalHooksPath = ""
@@ -80,7 +84,22 @@ func UninstallAgents(r *workspace.Project, m Manifest, agents []string) error {
 		}
 		remaining.Claude = nil
 	}
-	if remaining.Config.Path != "" || remaining.Claude != nil {
+	if removal.CodeBuddy != nil {
+		next, err := removeJSONHooks(removal.CodeBuddy, false, "codebuddy")
+		if err != nil {
+			return err
+		}
+		if next == nil {
+			err = tx.remove(removal.CodeBuddy.Path)
+		} else {
+			err = tx.write(removal.CodeBuddy.Path, next, 0600)
+		}
+		if err != nil {
+			return err
+		}
+		remaining.CodeBuddy = nil
+	}
+	if remaining.Config.Path != "" || remaining.Claude != nil || remaining.CodeBuddy != nil {
 		data, err := json.MarshalIndent(remaining, "", "  ")
 		if err != nil {
 			return err

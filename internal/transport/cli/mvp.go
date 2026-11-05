@@ -9,7 +9,6 @@ import (
 	"github.com/yhlooo/motif/internal/app/workspace"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -65,7 +64,7 @@ func printJSON(cmd *cobra.Command, v any) error {
 }
 func newHookCommand() *cobra.Command {
 	hook := &cobra.Command{Use: "hook", Short: "Receive Agent and Git hooks"}
-	for _, agent := range []string{"codex", "claude"} {
+	for _, agent := range []string{"codex", "claude", "codebuddy"} {
 		hook.AddCommand(&cobra.Command{Use: agent, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 			// Capture failures always fail open; stdout is reserved for the hook protocol.
 			err := func() error {
@@ -83,7 +82,9 @@ func newHookCommand() *cobra.Command {
 				}
 				defer s.Close()
 				var out map[string]string
-				if agent == "claude" {
+				if agent == "codebuddy" {
+					out, e = capture.CodeBuddy(cmd.Context(), s, raw)
+				} else if agent == "claude" {
 					out, e = capture.Claude(cmd.Context(), s, raw)
 				} else {
 					out, e = capture.Codex(cmd.Context(), s, raw)
@@ -95,11 +96,18 @@ func newHookCommand() *cobra.Command {
 					response, _ := json.Marshal(out)
 					logger.Info("agent hook processed: "+string(response), "agent", agent)
 				}
+				if agent == "codebuddy" && out["decision"] == "block" {
+					return &HookFeedback{out["reason"]}
+				}
 				if out != nil {
 					return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 				}
 				return nil
 			}()
+			var feedback *HookFeedback
+			if errors.As(err, &feedback) {
+				return err
+			}
 			if err != nil {
 				logr.FromContextOrDiscard(cmd.Context()).Error(err, "agent hook failed", "agent", agent)
 				fmt.Fprintf(cmd.ErrOrStderr(), "motif capture: %v\n", err)
@@ -270,8 +278,8 @@ func newBatchCommand() *cobra.Command {
 }
 func checkAgents(agents []string) error {
 	for _, a := range agents {
-		if a != "codex" && a != "claude" {
-			return &UsageError{fmt.Errorf("unsupported agent %q; supports codex, claude", a)}
+		if a != "codex" && a != "claude" && a != "codebuddy" {
+			return &UsageError{fmt.Errorf("unsupported agent %q; supports codex, claude, codebuddy", a)}
 		}
 	}
 	return nil
@@ -295,42 +303,21 @@ func newInstallCommand() *cobra.Command {
 		if plan.Override {
 			fmt.Fprintf(cmd.OutOrStdout(), "WARNING: inherited core.hooksPath = %s\nSet repository-local core.hooksPath to %s. Hooks from the inherited directory (including Git LFS hooks) will no longer run in this repository. Existing hooks in the destination will be preserved and chained. Linked worktrees of this repository share the local setting.\n", plan.Inherited, plan.Path)
 		}
-		reader := bufio.NewReader(cmd.InOrStdin())
+		input, interactive := installTerminal(cmd)
 		if len(agents) == 0 {
-			if !terminal() {
-				return fmt.Errorf("noninteractive install requires --agent codex or --agent claude")
+			if !interactive {
+				return fmt.Errorf("noninteractive install requires --agent codex, --agent claude or --agent codebuddy and --yes")
 			}
-			for _, agent := range []string{"codex", "claude"} {
-				_, detectedErr := exec.LookPath(agent)
-				detected := detectedErr == nil
-				prompt := fmt.Sprintf("[ ] %s (not found; configuration is still available). Install? [y/N] ", agent)
-				if detected {
-					prompt = fmt.Sprintf("[x] %s. Install? [Y/n] ", agent)
-				}
-				fmt.Fprint(cmd.OutOrStdout(), prompt)
-				line, e := reader.ReadString('\n')
-				if e != nil {
-					return e
-				}
-				answer := strings.TrimSpace(line)
-				if strings.EqualFold(answer, "y") || (answer == "" && detected) {
-					agents = append(agents, agent)
-				}
-			}
-			if len(agents) == 0 {
+			agents, e = chooseInstallAgents(cmd.Context(), input, cmd.OutOrStdout())
+			if errors.Is(e, errInstallCancelled) {
+				fmt.Fprintln(cmd.OutOrStdout(), "Installation cancelled.")
 				return nil
 			}
-		}
-		if plan.Override && !yes {
-			if !terminal() {
-				return fmt.Errorf("changing inherited hooks requires --yes; no integrations installed")
-			}
-			fmt.Fprint(cmd.OutOrStdout(), "Use repository-local hooks? [y/N] ")
-			line, e := reader.ReadString('\n')
 			if e != nil {
 				return e
 			}
-			if !strings.EqualFold(strings.TrimSpace(line), "y") {
+			if len(agents) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No agents selected; no integrations installed.")
 				return nil
 			}
 		}
@@ -338,7 +325,30 @@ func newInstallCommand() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		m, added, e := integration.InstallWithOptions(cmd.Context(), r, binary, integration.InstallOptions{ConfirmLocalHooksPath: plan.Override, Agents: agents})
+		m, added, e := integration.InstallWithOptions(cmd.Context(), r, binary, integration.InstallOptions{
+			ConfirmLocalHooksPath: plan.Override, Agents: agents,
+			BeforeApply: func(changes []integration.FileChange) error {
+				if len(changes) == 0 {
+					fmt.Fprintln(cmd.OutOrStdout(), "No file changes needed.")
+					return nil
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "Files to change:")
+				for _, change := range changes {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %-6s %s\n", change.Action, change.Path)
+				}
+				if yes {
+					return nil
+				}
+				if !interactive {
+					return fmt.Errorf("noninteractive install requires --yes; no integrations installed")
+				}
+				return confirmInstall(terminalReader{ctx: cmd.Context(), file: input}, cmd.OutOrStdout())
+			},
+		})
+		if errors.Is(e, errInstallCancelled) {
+			fmt.Fprintln(cmd.OutOrStdout(), "Installation cancelled.")
+			return nil
+		}
 		if e != nil {
 			return e
 		}
@@ -348,6 +358,9 @@ func newInstallCommand() *cobra.Command {
 		}
 		for _, agent := range agents {
 			path := m.Config.Path
+			if agent == "codebuddy" {
+				path = m.CodeBuddy.Path
+			}
 			if agent == "claude" {
 				path = m.Claude.Path
 			}
@@ -362,8 +375,8 @@ func newInstallCommand() *cobra.Command {
 		}
 		return nil
 	}}
-	cmd.Flags().StringArrayVar(&agents, "agent", nil, "Agent to configure (repeatable; codex, claude)")
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Confirm switching inherited hooks to repository-local hooks")
+	cmd.Flags().StringArrayVar(&agents, "agent", nil, "Agent to configure (repeatable; codex, claude, codebuddy)")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the displayed installation changes without prompting")
 	return cmd
 }
 func newUninstallCommand() *cobra.Command {
@@ -420,6 +433,9 @@ func newUninstallCommand() *cobra.Command {
 			}
 			if removal.Claude != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "Remove claude hooks: %s\n%s\n", removal.Claude.Path, removal.Claude.Content)
+			}
+			if removal.CodeBuddy != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Remove codebuddy hooks: %s\n%s\n", removal.CodeBuddy.Path, removal.CodeBuddy.Content)
 			}
 			for _, h := range removal.Hooks {
 				fmt.Fprintf(cmd.OutOrStdout(), "Managed Git hook (retained while another worktree owns it): %s\n%s", h.Path, h.Content)
@@ -492,10 +508,16 @@ func newDoctorCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if m.Claude == nil {
+		if m.Claude == nil && m.CodeBuddy == nil {
 			return printJSON(cmd, integration.Diagnose(cmd.Context(), r, m))
 		}
-		diagnostics := map[string]integration.Diagnostic{"claude": integration.DiagnoseAgent(cmd.Context(), r, m, "claude")}
+		diagnostics := map[string]integration.Diagnostic{}
+		if m.Claude != nil {
+			diagnostics["claude"] = integration.DiagnoseAgent(cmd.Context(), r, m, "claude")
+		}
+		if m.CodeBuddy != nil {
+			diagnostics["codebuddy"] = integration.DiagnoseAgent(cmd.Context(), r, m, "codebuddy")
+		}
 		if m.Config.Path != "" {
 			diagnostics["codex"] = integration.Diagnose(cmd.Context(), r, m)
 		}

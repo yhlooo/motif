@@ -156,6 +156,18 @@ func DiagnoseAgent(ctx context.Context, r *workspace.Project, m Manifest, agent 
 	if agent == "codex" {
 		return Diagnose(ctx, r, m)
 	}
+	if agent == "codebuddy" {
+		if m.CodeBuddy == nil {
+			return Diagnostic{Status: "missing", Detail: "CodeBuddy integration is not installed.", Hooks: []HookState{}}
+		}
+		if _, err := removeJSONHooks(m.CodeBuddy, false, "codebuddy"); err != nil {
+			return Diagnostic{Status: "conflict", Detail: err.Error(), Hooks: []HookState{}}
+		}
+		return Diagnostic{Status: "configured", Detail: "CodeBuddy IDE/plugin and CodeBuddy Code project hooks are configured. Restart the client and review hooks/trust settings; runtime execution has not been verified.", Hooks: []HookState{}}
+	}
+	if agent != "claude" {
+		return Diagnostic{Status: "unsupported", Detail: "Unsupported agent: " + agent, Hooks: []HookState{}}
+	}
 	if m.Claude == nil {
 		return Diagnostic{Status: "missing", Detail: "Claude Code integration is not installed.", Hooks: []HookState{}}
 	}

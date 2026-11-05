@@ -29,12 +29,13 @@ type File struct {
 	Shared  bool   `json:"shared,omitempty"`
 }
 type Manifest struct {
-	OwnerFile      string        `json:"owner_file,omitempty"`
-	ConfigCreated  bool          `json:"config_created,omitempty"`
-	Config         File          `json:"config"`
-	Hooks          []File        `json:"hooks"`
-	LocalHooksPath string        `json:"local_hooks_path,omitempty"`
-	Claude         *ClaudeConfig `json:"claude,omitempty"`
+	OwnerFile      string          `json:"owner_file,omitempty"`
+	ConfigCreated  bool            `json:"config_created,omitempty"`
+	Config         File            `json:"config"`
+	Hooks          []File          `json:"hooks"`
+	LocalHooksPath string          `json:"local_hooks_path,omitempty"`
+	Claude         *ClaudeConfig   `json:"claude,omitempty"`
+	CodeBuddy      *JSONHookConfig `json:"codebuddy,omitempty"`
 }
 
 func manifestPath(r *workspace.Project) string {
@@ -104,6 +105,7 @@ func Install(ctx context.Context, r *workspace.Project, binary string) (Manifest
 type InstallOptions struct {
 	ConfirmLocalHooksPath bool
 	Agents                []string
+	BeforeApply           func([]FileChange) error
 }
 
 func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string, options InstallOptions) (Manifest, bool, error) {
@@ -125,6 +127,7 @@ func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string
 	}
 	var next []byte
 	var claudeNext []byte
+	var codebuddyNext []byte
 	selected := map[string]bool{}
 	for _, agent := range agents {
 		if selected[agent] {
@@ -134,6 +137,8 @@ func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string
 		switch agent {
 		case "codex":
 			m, next, err = prepareCodex(ctx, r, binary, m)
+		case "codebuddy":
+			m.CodeBuddy, codebuddyNext, err = prepareCodeBuddy(r, binary, m.CodeBuddy)
 		case "claude":
 			m.Claude, claudeNext, err = prepareClaude(ctx, r, binary, m.Claude)
 		default:
@@ -232,32 +237,40 @@ func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string
 			return m, false, err
 		}
 	}
-	tx := &fileTransaction{}
-	defer tx.rollback()
+	installation := newInstallPlan()
 	if next != nil {
-		if err = tx.write(m.Config.Path, next, 0600); err != nil {
+		if err = installation.write(m.Config.Path, next, 0600); err != nil {
 			return m, false, err
 		}
 	}
 	if claudeNext != nil {
-		if err = tx.write(m.Claude.Path, claudeNext, 0600); err != nil {
+		if err = installation.write(m.Claude.Path, claudeNext, 0600); err != nil {
+			return m, false, err
+		}
+	}
+	if codebuddyNext != nil {
+		if err = installation.write(m.CodeBuddy.Path, codebuddyNext, 0600); err != nil {
 			return m, false, err
 		}
 	}
 	for source, destination := range backupMoves {
-		if err = tx.move(source, destination); err != nil {
+		if err = installation.move(source, destination); err != nil {
 			return m, false, err
 		}
 	}
 	for _, h := range m.Hooks {
 		if h.Backup != "" {
-			if _, e := os.Lstat(h.Backup); os.IsNotExist(e) {
-				if err = tx.move(h.Path, h.Backup); err != nil {
+			backup, e := installation.file(h.Backup)
+			if e != nil {
+				return m, false, e
+			}
+			if !backup.exists {
+				if err = installation.move(h.Path, h.Backup); err != nil {
 					return m, false, err
 				}
 			}
 		}
-		if err = tx.write(h.Path, []byte(h.Content), 0755); err != nil {
+		if err = installation.write(h.Path, []byte(h.Content), 0755); err != nil {
 			return m, false, err
 		}
 	}
@@ -265,22 +278,22 @@ func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string
 		if filepath.Dir(h.Path) == plan.Path || keep[h.Path] {
 			continue
 		}
-		if err = tx.remove(h.Path); err != nil {
+		if err = installation.remove(h.Path); err != nil {
 			return m, false, err
 		}
 		if h.Backup != "" {
-			if err = tx.move(h.Backup, h.Path); err != nil {
+			if err = installation.move(h.Backup, h.Path); err != nil {
 				return m, false, err
 			}
 		}
 	}
 	m.OwnerFile = filepath.Join(ownerDirectory(r, plan.Path), fmt.Sprintf("%x.json", sha256.Sum256([]byte(r.GitDir))))
 	ownerData, _ := json.Marshal(map[string]string{"git_dir": r.GitDir})
-	if err = tx.write(m.OwnerFile, ownerData, 0600); err != nil {
+	if err = installation.write(m.OwnerFile, ownerData, 0600); err != nil {
 		return m, false, err
 	}
 	if old.OwnerFile != "" && old.OwnerFile != m.OwnerFile {
-		if err = tx.remove(old.OwnerFile); err != nil {
+		if err = installation.remove(old.OwnerFile); err != nil {
 			return m, false, err
 		}
 	}
@@ -296,22 +309,30 @@ func InstallWithOptions(ctx context.Context, r *workspace.Project, binary string
 	}
 	if plan.Override {
 		configPath := filepath.Join(r.CommonDir, "config")
-		if err = tx.remember(configPath); err != nil {
+		if err = installation.configure(configPath, func() error {
+			_, err := r.Git(ctx, "config", "--local", "core.hooksPath", plan.Path)
+			return err
+		}); err != nil {
 			return m, false, err
 		}
-		if _, err = r.Git(ctx, "config", "--local", "core.hooksPath", plan.Path); err != nil {
-			return m, false, err
-		}
-		tx.changed = true
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return m, false, err
 	}
-	if err = tx.write(manifestPath(r), data, 0600); err != nil {
+	if err = installation.write(manifestPath(r), data, 0600); err != nil {
 		return m, false, err
 	}
-	if err = tx.remove(filepath.Join(r.GitDir, "motif-install.json")); err != nil {
+	if err = installation.remove(filepath.Join(r.GitDir, "motif-install.json")); err != nil {
+		return m, false, err
+	}
+	if options.BeforeApply != nil {
+		if err = options.BeforeApply(installation.changes()); err != nil {
+			return m, false, err
+		}
+	}
+	tx, err := installation.apply()
+	if err != nil {
 		return m, false, err
 	}
 	changed := tx.changed
@@ -338,6 +359,11 @@ func verify(m Manifest, allowMissing bool) error {
 	}
 	if m.Claude != nil {
 		if _, err := removeClaude(m.Claude, false); err != nil {
+			return err
+		}
+	}
+	if m.CodeBuddy != nil {
+		if _, err := removeJSONHooks(m.CodeBuddy, false, "codebuddy"); err != nil {
 			return err
 		}
 	}
