@@ -30,7 +30,7 @@ func TestCodeBuddyThreeAgentsRetainSharedHooks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if d := integration.DiagnoseAgent(ctx, r, m, "codebuddy"); d.Status != "configured" {
+	if d := integration.DiagnoseAgent(ctx, r, m, "codebuddy"); d.Status != "active" {
 		t.Fatal(d)
 	}
 	if err = integration.UninstallAgents(r, m, []string{"codebuddy"}); err != nil {

@@ -20,6 +20,6 @@ Stop 复用未分批 patch 提醒；CLI 将提醒作为专用 HookFeedback 错�
 
 ## 验证
 
-覆盖官方无 prompt/tool ID 输入、相同参数连续调用、相同内容的新用户轮次、generation_id、规范化参数、歧义降级、Stop 继续与分批、配置保留/权限/修复/冲突/事务回滚、多 agent 共存和选择性卸载。实际客户端加载与信任状态仍需通过 CodeBuddy 自身界面确认，doctor 返回 configured，不把文件存在等同运行时已生效。
+覆盖官方无 prompt/tool ID 输入、相同参数连续调用、相同内容的新用户轮次、generation_id、规范化参数、歧义降级、Stop 继续与分批、配置保留/权限/修复/冲突/事务回滚、多 agent 共存和选择性卸载。按后续用户确认的[诊断规则](20261105-doctor-output.md)，doctor 在受管理 hook 配置校验通过时返回 active；不以运行时查询能力区分状态，不伪造运行时 hook 明细。
 
 本次本地验证：CodeBuddy 及既有 capture / integration / CLI 测试通过；`go test ./... -skip '^TestWorktreeActualBytesAndFileTypes$'` 全部通过（使用临时 GOCACHE / MOTIF_DATA_DIR，并隔离用户 Git 全局配置）。未跳过的全量测试仅现有 `TestWorktreeActualBytesAndFileTypes` 失败：当前环境拒绝创建含非法 UTF-8 字节的文件名，返回 operation not permitted。未修改或弱化该用例。

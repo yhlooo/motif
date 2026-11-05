@@ -122,35 +122,7 @@ func writeInstallResult(ctx context.Context, output io.Writer, result installRes
 	}
 	heading(msgInstallRuntimeStatus)
 	for _, agent := range agents {
-		d := result.diagnostics[agent]
-		mark, code, summary := "!", "33", msgInstallUnknown
-		var details []string
-		switch d.Status {
-		case "active":
-			mark, code, summary = "✓", "32", msgInstallActive
-			details = append(details, t(msgInstallSessionOverrides))
-		case "configured":
-			mark, code, summary = "·", "", msgInstallPending
-		case "inactive":
-			summary = msgInstallInactive
-		case "unavailable":
-			summary = msgInstallUnavailable
-		case "conflict", "missing", "unsupported":
-			mark, code, summary = "✗", "31", msgInstallConflict
-		}
-		if d.Status != "configured" && len(details) == 0 && d.Detail != "" {
-			details = append(details, d.Detail)
-		}
-		summaryCode := code
-		if d.Status == "configured" {
-			summaryCode = "2"
-		}
-		fmt.Fprintf(&b, "    %s %-11s %s\n", paint(code, mark), installAgentName(agent), paint(summaryCode, t(summary)))
-		for _, detail := range details {
-			for _, line := range strings.Split(detail, "\n") {
-				fmt.Fprintf(&b, "      %s\n", line)
-			}
-		}
+		writeAgentDiagnostic(ctx, &b, agent, result.diagnostics[agent], color)
 	}
 	if result.hooksPlan.Override {
 		heading(msgInstallNotes)

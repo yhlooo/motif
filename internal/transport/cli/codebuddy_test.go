@@ -101,11 +101,22 @@ func TestCodeBuddyCLIInstallDoctorAndSelectiveUninstall(t *testing.T) {
 	if out := run("install", "--agent", "codebuddy", "--yes"); !strings.Contains(out, "✓ CodeBuddy") || !strings.Contains(out, ".codebuddy/settings.local.json") {
 		t.Fatal(out)
 	}
-	if out := run("doctor"); !strings.Contains(out, `"codebuddy"`) || !strings.Contains(out, `"configured"`) {
+	if out := run("doctor"); !strings.Contains(out, "✓ CodeBuddy") || json.Valid([]byte(out)) || strings.Contains(out, "\x1b[") {
+		t.Fatal(out)
+	}
+	if out := run("doctor", "-o", "json"); !strings.Contains(out, `"codebuddy"`) || !strings.Contains(out, `"active"`) {
 		t.Fatal(out)
 	}
 	run("install", "--agent", "codex", "--yes")
 	run("uninstall", "--agent", "codebuddy", "-y")
+	var codexDiagnostic struct {
+		Status string `json:"status"`
+	}
+	out := run("doctor", "--output", "json")
+	if err := json.Unmarshal([]byte(out), &codexDiagnostic); err != nil || codexDiagnostic.Status == "" {
+		t.Fatalf("Codex JSON shape changed: %s: %v", out, err)
+	}
+
 	if _, err = os.Stat(filepath.Join(root, ".codebuddy", "settings.local.json")); !os.IsNotExist(err) {
 		t.Fatal(err)
 	}

@@ -16,4 +16,4 @@
 
 ## 安装结果颜色
 
-安装完成输出使用 XTerm SGR 的 reset（0）、bold（1）、faint（2）及 red / green / yellow / cyan（31 / 32 / 33 / 36），依据[官方原文节选](../reference/go-term/20261105/xterm-screen.md)。颜色仅按实际 stdout 文件描述符是否为终端启用；TERM=dumb、非空 NO_COLOR 或重定向时不生成 SGR。颜色只辅助状态，成功、需处理警告、异常同时使用 ✓ / ! / ✗ 文本标记；configured 的普通重启提示使用无警告颜色的 ·。
+安装完成输出使用 XTerm SGR 的 reset（0）、bold（1）、faint（2）及 red / green / yellow / cyan（31 / 32 / 33 / 36），依据[官方原文节选](../reference/go-term/20261105/xterm-screen.md)。颜色仅按实际 stdout 文件描述符是否为终端启用；TERM=dumb、非空 NO_COLOR 或重定向时不生成 SGR。颜色只辅助状态，成功、需处理警告、异常同时使用 ✓ / ! / ✗ 文本标记；配置检查通过后的重启提示使用 SGR 2 降低亮度，通过标记统一使用绿色 ✓。

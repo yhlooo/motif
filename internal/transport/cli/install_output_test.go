@@ -25,7 +25,7 @@ func TestInstallResultGroupsPathsAndPreservesRuntimeStatus(t *testing.T) {
 					CodeBuddy: &integration.JSONHookConfig{File: integration.File{Path: filepath.Join(root, ".codebuddy", "settings.local.json")}},
 					Hooks:     []integration.File{{Path: filepath.Join(root, ".git", "hooks", "post-commit")}, {Path: filepath.Join(root, ".git", "hooks", "post-checkout")}},
 				},
-				diagnostics: map[string]integration.Diagnostic{"codex": {Status: "active"}, "claude": {Status: "configured"}, "codebuddy": {Status: "configured"}},
+				diagnostics: map[string]integration.Diagnostic{"codex": {Status: "active"}, "claude": {Status: "active"}, "codebuddy": {Status: "active"}},
 			}
 			var output bytes.Buffer
 			if err := writeInstallResult(ctx, &output, result, false); err != nil {
@@ -36,16 +36,16 @@ func TestInstallResultGroupsPathsAndPreservesRuntimeStatus(t *testing.T) {
 			if err := writeInstallResult(ctx, &colored, result, true); err != nil {
 				t.Fatal(err)
 			}
-			if text := colored.String(); strings.Contains(text, "\x1b[33m") || strings.Contains(text, "\x1b[31m") || !strings.Contains(text, "    · CodeBuddy") || !strings.Contains(text, "    · Claude Code") || !strings.Contains(text, "CodeBuddy   \x1b[2m") || !strings.Contains(text, "Claude Code \x1b[2m") {
+			if text := colored.String(); strings.Contains(text, "\x1b[33m") || strings.Contains(text, "\x1b[31m") || !strings.Contains(text, "    \x1b[32m✓\x1b[0m CodeBuddy") || !strings.Contains(text, "    \x1b[32m✓\x1b[0m Claude Code") || !strings.Contains(text, "CodeBuddy   \x1b[2m") || !strings.Contains(text, "Claude Code \x1b[2m") {
 				t.Fatal(text)
 			}
 
-			for _, want := range []string{"    ✓ Codex\n      .codex/config.toml", "    ✓ CodeBuddy\n      .codebuddy/settings.local.json", "    ✓ post-commit", "    ✓ post-checkout", "    · CodeBuddy", "    · Claude Code"} {
+			for _, want := range []string{"    ✓ Codex\n      .codex/config.toml", "    ✓ CodeBuddy\n      .codebuddy/settings.local.json", "    ✓ post-commit", "    ✓ post-checkout", "    ✓ CodeBuddy", "    ✓ Claude Code"} {
 				if !strings.Contains(s, want) {
 					t.Fatalf("missing %q:\n%s", want, s)
 				}
 			}
-			if strings.Contains(s, "\x1b[") || strings.Contains(s, root) || strings.Count(s, ".git/hooks/") != 1 || strings.Count(s, "✓ CodeBuddy") != 1 {
+			if strings.Contains(s, "\x1b[") || strings.Contains(s, root) || strings.Count(s, ".git/hooks/") != 1 || strings.Count(s, "✓ CodeBuddy") != 2 {
 				t.Fatal(s)
 			}
 			if locale == "zh-CN" {

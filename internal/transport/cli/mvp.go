@@ -488,7 +488,11 @@ func newWebCommand() *cobra.Command {
 }
 
 func newDoctorCommand() *cobra.Command {
-	return &cobra.Command{Use: "doctor", Short: "Inspect installed Agent hooks without executing them", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	var output string
+	cmd := &cobra.Command{Use: "doctor", Short: "Inspect installed Agent hooks without executing them", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		if output != "text" && output != "json" {
+			return &UsageError{fmt.Errorf("unsupported output %q; supports text, json", output)}
+		}
 		s, r, _, err := openProject(cmd)
 		if err != nil {
 			return err
@@ -498,19 +502,32 @@ func newDoctorCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if m.Claude == nil && m.CodeBuddy == nil {
-			return printJSON(cmd, integration.Diagnose(cmd.Context(), r, m))
+		var agents []string
+		if m.Config.Path != "" {
+			agents = append(agents, "codex")
 		}
-		diagnostics := map[string]integration.Diagnostic{}
 		if m.Claude != nil {
-			diagnostics["claude"] = integration.DiagnoseAgent(cmd.Context(), r, m, "claude")
+			agents = append(agents, "claude")
 		}
 		if m.CodeBuddy != nil {
-			diagnostics["codebuddy"] = integration.DiagnoseAgent(cmd.Context(), r, m, "codebuddy")
+			agents = append(agents, "codebuddy")
 		}
-		if m.Config.Path != "" {
-			diagnostics["codex"] = integration.Diagnose(cmd.Context(), r, m)
+		if len(agents) == 0 {
+			agents = []string{"codex"}
 		}
-		return printJSON(cmd, diagnostics)
+		diagnostics := map[string]integration.Diagnostic{}
+		for _, agent := range agents {
+			diagnostics[agent] = integration.DiagnoseAgent(cmd.Context(), r, m, agent)
+		}
+		if output == "json" {
+			// Preserve the existing JSON shape for Codex-only installations.
+			if m.Claude == nil && m.CodeBuddy == nil {
+				return printJSON(cmd, diagnostics["codex"])
+			}
+			return printJSON(cmd, diagnostics)
+		}
+		return writeDoctorResult(cmd.Context(), cmd.OutOrStdout(), r.Root, m, agents, diagnostics, installColor(cmd.OutOrStdout()))
 	}}
+	cmd.Flags().StringVarP(&output, "output", "o", "text", "Output format: text or json")
+	return cmd
 }

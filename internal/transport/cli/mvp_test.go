@@ -28,7 +28,7 @@ func TestHookStorageAndInputFailuresFailOpen(t *testing.T) {
 	}
 }
 func TestUsageErrorsHaveExitCodeTwo(t *testing.T) {
-	for _, args := range [][]string{{"patch", "get"}, {"install", "--agent", "unsupported"}, {"patch", "ls", "--format", "wrong"}, {"--verbose", "3"}, {"patch", "ls", "--unknown"}} {
+	for _, args := range [][]string{{"doctor", "-o", "yaml"}, {"patch", "get"}, {"install", "--agent", "unsupported"}, {"patch", "ls", "--format", "wrong"}, {"--verbose", "3"}, {"patch", "ls", "--unknown"}} {
 		cmd := cli.NewCommand("motif")
 		cmd.SetArgs(args)
 		var out bytes.Buffer

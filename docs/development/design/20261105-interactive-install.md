@@ -30,10 +30,10 @@ integration.InstallWithOptions 保留现有安装接口与缺失修复能力，�
 
 项目内路径相对项目根目录显示；项目外 hook 路径保留完整路径。每个 hook 目录只展示一次，目录下列出脚本名。重复的 --agent 不重复展示。原 hook 备份只在此次新增或迁移时展示，继承 hooksPath 的切换提示也只在发生切换时展示；安装前的文件预览和风险说明保留。
 
-展示层只读取安装 manifest、实际变更清单和已有 DiagnoseAgent 返回值。active 才显示绿色运行状态，并保留当前会话覆盖说明；configured 使用无警告颜色的中性标记 · 和“配置已写入，重启客户端后生效”，不重复输出无法通过用户操作消除的运行时验证限制。诊断接口仍保留真实验证状态和协议要求。inactive / unavailable / conflict 等状态保留原诊断原因，不把配置写入成功视为运行时已生效。doctor 的结构化输出保持不变。
+展示层只读取安装 manifest、实际变更清单和已有 DiagnoseAgent 返回值。检查通过统一显示绿色 ✓；Claude Code / CodeBuddy 按配置校验通过返回 active，旁边保留暗色“配置已写入，重启客户端后生效”。Codex 保留当前会话覆盖说明，不以客户端是否提供运行时查询能力区分通过标记。inactive / unavailable / conflict 等状态保留原诊断原因，不把配置写入成功视为运行时已生效。doctor 的结构化输出保持不变。
 
-本次日志调整验证：CLI 全部测试通过；新增输出用例覆盖中英文分组、路径去重、待确认状态、异常原因、按需备份与继承路径提示。真实 PTY 检查了 SGR 颜色与缩进；真实管道输出确认没有 ANSI 序列，重复安装显示“配置已就绪”并保留运行状态待确认。
+本次日志调整验证：CLI 全部测试通过；新增输出用例覆盖中英文分组、路径去重、通过状态、异常原因、按需备份与继承路径提示。真实 PTY 检查了 SGR 颜色与缩进；真实管道输出确认没有 ANSI 序列，重复安装显示“配置已就绪”并保留暗色重启提示。
 
-按用户反馈，Claude Code / CodeBuddy 的 configured 是普通安装后提示，不属于警告。保持 doctor 原始诊断不变，安装摘要改用中性重启提示；实际 inactive / unavailable / conflict 的诊断继续展示。
+Claude Code / CodeBuddy 的受管理配置校验通过时返回 active 并显示绿色 ✓，暗色重启提示不属于警告。实际 inactive / unavailable / conflict 的诊断继续展示。
 
-重启提示的文字使用 SGR 2 降低亮度，和保持正常亮度的 Claude Code / CodeBuddy 名称区分；中性标记保持正常亮度，重定向时不输出样式。
+重启提示的文字使用 SGR 2 降低亮度，和保持正常亮度的 Claude Code / CodeBuddy 名称区分；配置检查通过后统一显示绿色 ✓，重定向时不输出样式。
