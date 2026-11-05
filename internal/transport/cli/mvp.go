@@ -325,9 +325,11 @@ func newInstallCommand() *cobra.Command {
 		if e != nil {
 			return e
 		}
+		var fileChanges []integration.FileChange
 		m, added, e := integration.InstallWithOptions(cmd.Context(), r, binary, integration.InstallOptions{
 			ConfirmLocalHooksPath: plan.Override, Agents: agents,
 			BeforeApply: func(changes []integration.FileChange) error {
+				fileChanges = changes
 				if len(changes) == 0 {
 					fmt.Fprintln(cmd.OutOrStdout(), "No file changes needed.")
 					return nil
@@ -352,28 +354,16 @@ func newInstallCommand() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		state := "already configured"
-		if added {
-			state = "installed"
-		}
+		diagnostics := map[string]integration.Diagnostic{}
 		for _, agent := range agents {
-			path := m.Config.Path
-			if agent == "codebuddy" {
-				path = m.CodeBuddy.Path
+			if _, ok := diagnostics[agent]; !ok {
+				diagnostics[agent] = integration.DiagnoseAgent(cmd.Context(), r, m, agent)
 			}
-			if agent == "claude" {
-				path = m.Claude.Path
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s (%s)\n", agent, state, path)
 		}
-		for _, h := range m.Hooks {
-			fmt.Fprintln(cmd.OutOrStdout(), "Git hook:", h.Path)
-		}
-		for _, agent := range agents {
-			diagnostic := integration.DiagnoseAgent(cmd.Context(), r, m, agent)
-			fmt.Fprintf(cmd.OutOrStdout(), "%s hooks: %s — %s\n", agent, diagnostic.Status, diagnostic.Detail)
-		}
-		return nil
+		return writeInstallResult(cmd.Context(), cmd.OutOrStdout(), installResult{
+			root: r.Root, agents: agents, manifest: m, changed: added,
+			changes: fileChanges, hooksPlan: plan, diagnostics: diagnostics,
+		}, installColor(cmd.OutOrStdout()))
 	}}
 	cmd.Flags().StringArrayVar(&agents, "agent", nil, "Agent to configure (repeatable; codex, claude, codebuddy)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the displayed installation changes without prompting")

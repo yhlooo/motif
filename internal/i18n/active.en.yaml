@@ -8,3 +8,35 @@ integration.CodexPostToolUseStatus: Motif snapshot after tool execution
 integration.CodexPreToolUseStatus: Motif snapshot before tool execution
 integration.CodexSessionEndStatus: Motif snapshot at session end
 integration.CodexStopStatus: Motif snapshot at turn end
+commands.InstallComplete:
+    other: "Installation complete"
+commands.InstallUnchanged:
+    other: "Already configured"
+commands.InstallAgentConfigs:
+    other: "Agent configuration"
+commands.InstallGitHooks:
+    other: "Git hooks"
+commands.InstallDirectory:
+    other: "Directory"
+commands.InstallBackups:
+    other: "Original hook backups"
+commands.InstallRuntimeStatus:
+    other: "Runtime status"
+commands.InstallNotes:
+    other: "Notes"
+commands.InstallActive:
+    other: "Loaded and allowed to execute"
+commands.InstallPending:
+    other: "Configured; restart the client to apply"
+commands.InstallInactive:
+    other: "Hooks are not fully active"
+commands.InstallUnavailable:
+    other: "Runtime not verified"
+commands.InstallConflict:
+    other: "Integration needs attention"
+commands.InstallUnknown:
+    other: "Runtime status unknown"
+commands.InstallSessionOverrides:
+    other: "Session overrides may still affect execution."
+commands.InstallInherited:
+    other: "Inherited hooks no longer run in this repository."
