@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"github.com/yhlooo/motif/internal/transport/cli"
 	"os"
 	"os/exec"
@@ -134,7 +135,10 @@ func TestClaudeCLIInstallDoctorAndSelectiveUninstall(t *testing.T) {
 	if out := run("install", "--agent", "claude", "--yes"); !strings.Contains(out, "✓ Claude Code") || !strings.Contains(out, ".claude/settings.local.json") {
 		t.Fatal(out)
 	}
-	if out := run("doctor"); !strings.Contains(out, `"claude"`) || !strings.Contains(out, `"unavailable"`) {
+	if out := run("doctor"); !strings.Contains(out, "Claude Code") || json.Valid([]byte(out)) || strings.Contains(out, "\x1b[") {
+		t.Fatal(out)
+	}
+	if out := run("doctor", "-o", "json"); !strings.Contains(out, `"claude"`) || !strings.Contains(out, `"active"`) {
 		t.Fatal(out)
 	}
 	run("install", "--agent", "codex", "--yes")

@@ -150,8 +150,8 @@ func unavailable(err error) Diagnostic {
 	return Diagnostic{Status: "unavailable", Detail: "无法通过当前 Codex CLI 查询生效配置；请检查 CLI 版本与配置。尚未确认采集生效。", Hooks: []HookState{}}
 }
 
-// DiagnoseAgent distinguishes installed files from effective runtime trust.
-// Claude has no Codex-style hooks/list endpoint; never claim runtime activation.
+// DiagnoseAgent checks each integration according to its supported health check.
+// Valid managed hook configuration is sufficient for Claude Code and CodeBuddy.
 func DiagnoseAgent(ctx context.Context, r *workspace.Project, m Manifest, agent string) Diagnostic {
 	if agent == "codex" {
 		return Diagnose(ctx, r, m)
@@ -163,7 +163,7 @@ func DiagnoseAgent(ctx context.Context, r *workspace.Project, m Manifest, agent 
 		if _, err := removeJSONHooks(m.CodeBuddy, false, "codebuddy"); err != nil {
 			return Diagnostic{Status: "conflict", Detail: err.Error(), Hooks: []HookState{}}
 		}
-		return Diagnostic{Status: "configured", Detail: "CodeBuddy IDE/plugin and CodeBuddy Code project hooks are configured. Restart the client and review hooks/trust settings; runtime execution has not been verified.", Hooks: []HookState{}}
+		return Diagnostic{Status: "active", Detail: "CodeBuddy project hook configuration is valid. Restart the client to apply changes.", Hooks: []HookState{}}
 	}
 	if agent != "claude" {
 		return Diagnostic{Status: "unsupported", Detail: "Unsupported agent: " + agent, Hooks: []HookState{}}
@@ -174,8 +174,5 @@ func DiagnoseAgent(ctx context.Context, r *workspace.Project, m Manifest, agent 
 	if _, err := removeClaude(m.Claude, false); err != nil {
 		return Diagnostic{Status: "conflict", Detail: err.Error(), Hooks: []HookState{}}
 	}
-	if _, err := exec.LookPath("claude"); err != nil {
-		return Diagnostic{Status: "unavailable", Detail: "Claude Code CLI is not installed; project hooks have been configured.", Hooks: []HookState{}}
-	}
-	return Diagnostic{Status: "configured", Detail: "Claude Code project hooks are configured. Restart Claude Code and inspect /hooks; project trust, managed policy and session overrides determine execution. Capture requires prompt_id in hook input.", Hooks: []HookState{}}
+	return Diagnostic{Status: "active", Detail: "Claude Code project hook configuration is valid. Restart the client to apply changes.", Hooks: []HookState{}}
 }

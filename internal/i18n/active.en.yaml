@@ -40,3 +40,9 @@ commands.InstallSessionOverrides:
     other: "Session overrides may still affect execution."
 commands.InstallInherited:
     other: "Inherited hooks no longer run in this repository."
+commands.DoctorTitle:
+    other: "Hook diagnostics"
+commands.DoctorEnabled:
+    other: "enabled"
+commands.DoctorDisabled:
+    other: "disabled"

@@ -60,3 +60,9 @@ commands.InstallSessionOverrides:
     other: "当前会话的额外覆盖仍以该会话为准。"
 commands.InstallInherited:
     other: "继承目录中的 hooks 已不再在本仓库运行。"
+commands.DoctorTitle:
+    other: "Hook 诊断"
+commands.DoctorEnabled:
+    other: "已启用"
+commands.DoctorDisabled:
+    other: "未启用"

@@ -15,6 +15,34 @@ import (
 	"github.com/yhlooo/motif/internal/app/integration"
 )
 
+func TestClaudeAndCodeBuddyAreActiveWhenConfigurationIsValid(t *testing.T) {
+	for _, agent := range []string{"claude", "codebuddy"} {
+		t.Run(agent, func(t *testing.T) {
+			r, _ := installProject(t)
+			ctx := context.Background()
+			m, _, err := integration.InstallWithOptions(ctx, r, "/motif", integration.InstallOptions{Agents: []string{agent}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// IDE/plugin users need not have an agent CLI on PATH.
+			t.Setenv("PATH", t.TempDir())
+			if d := integration.DiagnoseAgent(ctx, r, m, agent); d.Status != "active" {
+				t.Fatal(d)
+			}
+			config := m.Claude
+			if agent == "codebuddy" {
+				config = m.CodeBuddy
+			}
+			if err = os.WriteFile(config.Path, []byte(`{"hooks":`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if d := integration.DiagnoseAgent(ctx, r, m, agent); d.Status != "conflict" {
+				t.Fatal("invalid configuration was accepted", d)
+			}
+		})
+	}
+}
+
 func TestDiagnoseReportsEffectiveHookTrust(t *testing.T) {
 	root := t.TempDir()
 	cmd := exec.Command("git", "init")
