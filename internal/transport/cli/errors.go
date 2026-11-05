@@ -8,9 +8,18 @@ import (
 
 type UsageError struct{ error }
 
+// HookFeedback is intentional Stop feedback, delivered on stderr with exit 2.
+type HookFeedback struct{ Reason string }
+
+func (e *HookFeedback) Error() string { return e.Reason }
+
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
+	}
+	var feedback *HookFeedback
+	if errors.As(err, &feedback) {
+		return 2
 	}
 	var usage *UsageError
 	if errors.As(err, &usage) || errors.Is(err, sqlite.ErrInvalidArgument) {
