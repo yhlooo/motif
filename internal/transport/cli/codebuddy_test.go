@@ -98,7 +98,7 @@ func TestCodeBuddyCLIInstallDoctorAndSelectiveUninstall(t *testing.T) {
 		}
 		return out.String()
 	}
-	if out := run("install", "--agent", "codebuddy", "--yes"); !strings.Contains(out, "codebuddy: installed") {
+	if out := run("install", "--agent", "codebuddy", "--yes"); !strings.Contains(out, "✓ CodeBuddy") || !strings.Contains(out, ".codebuddy/settings.local.json") {
 		t.Fatal(out)
 	}
 	if out := run("doctor"); !strings.Contains(out, `"codebuddy"`) || !strings.Contains(out, `"configured"`) {

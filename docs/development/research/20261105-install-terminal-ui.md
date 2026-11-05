@@ -13,3 +13,7 @@
 - 读取终端使用现有 x/sys/unix.Poll，定期检查 context，避免后台 goroutine 在取消后继续抢读终端。列表读取每次只消费一个字节，不吞掉随后确认阶段的输入。
 - 列表在独立终端屏幕中展示，结束时恢复原屏幕和光标；文件修改清单与确认保留在普通输出中，便于回看。
 - 终端协议依赖 ANSI/xterm 能力；TERM=dumb 或非终端输入/输出使用显式 --agent 与 --yes，不输出控制序列。
+
+## 安装结果颜色
+
+安装完成输出使用 XTerm SGR 的 reset（0）、bold（1）、faint（2）及 red / green / yellow / cyan（31 / 32 / 33 / 36），依据[官方原文节选](../reference/go-term/20261105/xterm-screen.md)。颜色仅按实际 stdout 文件描述符是否为终端启用；TERM=dumb、非空 NO_COLOR 或重定向时不生成 SGR。颜色只辅助状态，成功、需处理警告、异常同时使用 ✓ / ! / ✗ 文本标记；configured 的普通重启提示使用无警告颜色的 ·。

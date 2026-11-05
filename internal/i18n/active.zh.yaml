@@ -28,3 +28,35 @@ integration.CodexSessionEndStatus:
 integration.CodexStopStatus:
     hash: sha1-ec797cc77ab7083f61e5ec5b784fa6b26ef3b462
     other: Motif 回合结束快照
+commands.InstallComplete:
+    other: "安装完成"
+commands.InstallUnchanged:
+    other: "配置已就绪"
+commands.InstallAgentConfigs:
+    other: "Agent 配置"
+commands.InstallGitHooks:
+    other: "Git hooks"
+commands.InstallDirectory:
+    other: "目录"
+commands.InstallBackups:
+    other: "原 hook 备份"
+commands.InstallRuntimeStatus:
+    other: "生效状态"
+commands.InstallNotes:
+    other: "提示"
+commands.InstallActive:
+    other: "已加载，允许执行"
+commands.InstallPending:
+    other: "配置已写入，重启客户端后生效"
+commands.InstallInactive:
+    other: "部分 hooks 未生效"
+commands.InstallUnavailable:
+    other: "运行状态待确认"
+commands.InstallConflict:
+    other: "集成状态异常"
+commands.InstallUnknown:
+    other: "运行状态未知"
+commands.InstallSessionOverrides:
+    other: "当前会话的额外覆盖仍以该会话为准。"
+commands.InstallInherited:
+    other: "继承目录中的 hooks 已不再在本仓库运行。"

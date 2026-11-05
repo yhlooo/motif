@@ -131,7 +131,7 @@ func TestClaudeCLIInstallDoctorAndSelectiveUninstall(t *testing.T) {
 		}
 		return out.String()
 	}
-	if out := run("install", "--agent", "claude", "--yes"); !strings.Contains(out, "claude: installed") {
+	if out := run("install", "--agent", "claude", "--yes"); !strings.Contains(out, "✓ Claude Code") || !strings.Contains(out, ".claude/settings.local.json") {
 		t.Fatal(out)
 	}
 	if out := run("doctor"); !strings.Contains(out, `"claude"`) || !strings.Contains(out, `"unavailable"`) {
