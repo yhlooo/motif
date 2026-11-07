@@ -15,9 +15,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	contents "github.com/yhlooo/motif/internal/content"
 	"github.com/yhlooo/motif/internal/domain"
+	"github.com/yhlooo/motif/internal/domain/state"
 )
 
 type Repository struct {
@@ -30,6 +32,7 @@ type Repository struct {
 	treeLoads               atomic.Int64
 	gitCalls                atomic.Int64
 	blobBytes               atomic.Int64
+	worktreeBytes           atomic.Int64
 	diffCache               boundedCache
 }
 
@@ -123,10 +126,10 @@ func ValidOID(oid string) bool {
 	return err == nil
 }
 
-type ReadStats struct{ GitCalls, TreeLoads, BlobBytes int64 }
+type ReadStats struct{ GitCalls, TreeLoads, BlobBytes, WorktreeBytes int64 }
 
 func (r *Repository) ReadStats() ReadStats {
-	return ReadStats{r.gitCalls.Load(), r.treeLoads.Load(), r.blobBytes.Load()}
+	return ReadStats{r.gitCalls.Load(), r.treeLoads.Load(), r.blobBytes.Load(), r.worktreeBytes.Load()}
 }
 func (r *Repository) Tree(ctx context.Context, oid string) (domain.State, error) {
 	if oid != "" && !ValidOID(oid) {
@@ -138,22 +141,28 @@ func (r *Repository) Tree(ctx context.Context, oid string) (domain.State, error)
 		return domain.Clone(state), nil
 	}
 	r.treeLoads.Add(1)
-	state := domain.From(map[string]domain.File{})
+	ref := state.BaselineRef{CommonDir: r.CommonDir, ObjectFormat: r.ObjectFormat}
 	if oid == "" {
-		return state, nil
+		return state.FromBaseline(ref, nil), nil
 	}
+	treeID, e := r.Git(ctx, "rev-parse", oid+"^{tree}")
+	if e != nil {
+		return domain.State{}, e
+	}
+	ref.Tree = strings.TrimSpace(string(treeID))
 	raw, err := r.Git(ctx, "ls-tree", "-rz", "--full-tree", oid)
 	if err != nil {
 		return domain.State{}, err
 	}
 	entries := map[string]domain.File{}
+	var managed []string
 	for _, entry := range bytes.Split(raw, []byte{0}) {
 		if len(entry) == 0 {
 			continue
 		}
 		header, path, ok := bytes.Cut(entry, []byte{'\t'})
 		if r.managedPath(string(path)) {
-			continue
+			managed = append(managed, string(path))
 		}
 		fields := strings.Fields(string(header))
 		if !ok || len(fields) != 3 {
@@ -168,26 +177,33 @@ func (r *Repository) Tree(ctx context.Context, oid string) (domain.State, error)
 		}
 		entries[string(path)] = f
 	}
-	state = domain.From(entries)
+	treeState := state.FromBaseline(ref, entries)
+	for _, p := range managed {
+		treeState = treeState.Delete(p)
+	}
 	// Bound state caching by entries and tree count; callers receive independent maps.
 	if r.trees == nil {
 		r.trees = map[string]domain.State{}
 	}
-	if r.treeEntries+state.Len() > 100000 || len(r.trees) >= 16 {
+	if r.treeEntries+treeState.Len() > 100000 || len(r.trees) >= 16 {
 		r.trees = map[string]domain.State{}
 		r.treeEntries = 0
 	}
-	if state.Len() <= 100000 {
-		r.trees[oid] = domain.Clone(state)
-		r.treeEntries += state.Len()
+	if treeState.Len() <= 100000 {
+		r.trees[oid] = domain.Clone(treeState)
+		r.treeEntries += treeState.Len()
 	}
-	return state, nil
+	return treeState, nil
 }
 func validPath(p string) bool {
 	return p != "" && !filepath.IsAbs(p) && filepath.Clean(p) == p && p != ".." && !strings.HasPrefix(p, ".."+string(filepath.Separator)) && p != ".git" && !strings.HasPrefix(p, ".git/")
 }
 func (r *Repository) Worktree(ctx context.Context, base domain.State, previous ...domain.State) (domain.State, error) {
 	paths := map[string]bool{}
+	candidates, err := r.captureCandidates(ctx, base)
+	if err != nil {
+		return domain.State{}, err
+	}
 	gitlinks := map[string]string{}
 	for p, f := range base.All() {
 		paths[p] = true
@@ -195,7 +211,7 @@ func (r *Repository) Worktree(ctx context.Context, base domain.State, previous .
 			gitlinks[p] = f.OID
 		}
 	}
-	raw, err := r.Git(ctx, "ls-files", "--stage", "-z")
+	raw, err := r.Git(ctx, "ls-files", "--stage", "-v", "-z")
 	if err != nil {
 		return domain.State{}, err
 	}
@@ -204,6 +220,14 @@ func (r *Repository) Worktree(ctx context.Context, base domain.State, previous .
 			continue
 		}
 		header, path, ok := bytes.Cut(entry, []byte{'\t'})
+		if len(header) < 2 {
+			return domain.State{}, fmt.Errorf("invalid index entry")
+		}
+		flag := header[0]
+		if flag == 'S' || flag >= 'a' && flag <= 'z' {
+			candidates[string(path)] = true
+		}
+		header = header[2:]
 		h := strings.Fields(string(header))
 		if !ok || len(h) != 3 {
 			return domain.State{}, fmt.Errorf("invalid index entry")
@@ -224,40 +248,50 @@ func (r *Repository) Worktree(ctx context.Context, base domain.State, previous .
 	for _, p := range bytes.Split(raw, []byte{0}) {
 		if len(p) > 0 {
 			paths[string(p)] = true
+			candidates[string(p)] = true
 		}
 	}
 	scopeExit := map[string]domain.File{}
+	var absent []string
 	if len(previous) > 0 {
-		for p, f := range previous[0].All() {
-			if paths[p] {
-				continue
-			}
-			if !validPath(p) {
-				return domain.State{}, fmt.Errorf("unsafe previous path")
-			}
-			// check-ignore only evaluates rules; no contents outside the scope are read.
-			_, e := r.Git(ctx, "check-ignore", "-q", "--", p)
-			if e == nil {
-				paths[p] = true
-				f.ContentRef = ""
-				f.ContentID = ""
-				f.OID = ""
-				f.OutOfScope = true
-				scopeExit[p] = f
-			} else {
-				var exit *exec.ExitError
-				if !errors.As(e, &exit) || exit.ExitCode() != 1 {
-					return domain.State{}, e
+		for p := range previous[0].All() {
+			if !paths[p] {
+				if !validPath(p) {
+					return domain.State{}, fmt.Errorf("unsafe previous path")
 				}
+				absent = append(absent, p)
 			}
 		}
+		ignored, e := r.ignoredPaths(ctx, absent)
+		if e != nil {
+			return domain.State{}, e
+		}
+		for p := range ignored {
+			f, _ := previous[0].Lookup(p)
+			paths[p] = true
+			f.ContentRef = ""
+			f.ContentID = ""
+			f.OID = ""
+			f.OutOfScope = true
+			scopeExit[p] = f
+		}
+		for _, entry := range previous[0].Overrides() {
+			candidates[string(entry.Path)] = true
+		}
 	}
+	fingerprint, e := r.captureAttributes(ctx, paths, candidates)
+	if e != nil {
+		return domain.State{}, e
+	}
+	cache := r.loadFileCache(previous, fingerprint)
+	nextCache := fileCache{Fingerprint: fingerprint, ValidatedAt: time.Now().UnixNano(), Files: map[string]fileStamp{}}
 	state := base
-	if len(previous) > 0 {
-		state = previous[0]
-	}
+	directories := map[string]bool{}
 	seen := map[string]bool{}
 	for p := range paths {
+		if e := ctx.Err(); e != nil {
+			return domain.State{}, e
+		}
 		if r.managedPath(p) {
 			continue
 		}
@@ -265,22 +299,9 @@ func (r *Repository) Worktree(ctx context.Context, base domain.State, previous .
 			return domain.State{}, fmt.Errorf("unsafe repository path %q", p)
 		}
 		// Never follow a symlink in an ancestor directory outside the repository.
-		blocked := false
-		parent := filepath.Dir(p)
-		for parent != "." {
-			info, e := os.Lstat(filepath.Join(r.Root, parent))
-			if errors.Is(e, os.ErrNotExist) {
-				blocked = true
-				break
-			}
-			if e != nil {
-				return domain.State{}, e
-			}
-			if !info.IsDir() {
-				blocked = true
-				break
-			}
-			parent = filepath.Dir(parent)
+		blocked, e := r.blockedParents(ctx, p, directories)
+		if e != nil {
+			return domain.State{}, e
 		}
 		if blocked {
 			continue
@@ -306,6 +327,13 @@ func (r *Repository) Worktree(ctx context.Context, base domain.State, previous .
 			if e != nil {
 				return domain.State{}, e
 			}
+			after, e := os.Lstat(full)
+			if e != nil {
+				return domain.State{}, e
+			}
+			if !os.SameFile(info, after) || stamp(info) != stamp(after) {
+				return domain.State{}, ErrCaptureChanged
+			}
 			f.Mode = "120000"
 			content = []byte(target)
 		case info.IsDir():
@@ -328,7 +356,23 @@ func (r *Repository) Worktree(ctx context.Context, base domain.State, previous .
 			}
 			continue
 		case info.Mode().IsRegular():
-			content, e = os.ReadFile(full)
+			mode := "100644"
+			if info.Mode().Perm()&0111 != 0 {
+				mode = "100755"
+			}
+			original, inBase := base.Lookup(p)
+			if !candidates[p] && inBase && original.Mode == mode {
+				state = state.Set(p, original)
+				seen[p] = true
+				continue
+			}
+			if old, ok := cachedFile(p, info, cache, previous); ok {
+				state = state.Set(p, old)
+				seen[p] = true
+				nextCache.Files[cacheKey(p)] = cache.Files[cacheKey(p)]
+				continue
+			}
+			content, info, e = readStable(ctx, full, info)
 			if e != nil {
 				return domain.State{}, e
 			}
@@ -338,25 +382,34 @@ func (r *Repository) Worktree(ctx context.Context, base domain.State, previous .
 		default:
 			return domain.State{}, fmt.Errorf("unsupported special file %s", domain.DisplayPath(p))
 		}
+		r.worktreeBytes.Add(int64(len(content)))
 		f.ContentID = contents.GitIdentity(content, r.ObjectFormat)
 		original, exists := base.Lookup(p)
 		if exists && !original.OutOfScope && original.ContentID == f.ContentID {
 			f.ContentRef = original.ContentRef
 		}
 		if f.ContentRef == "" {
-			if old, ok := state.Lookup(p); ok && !old.OutOfScope && old.ContentID == f.ContentID {
+			var old domain.File
+			var ok bool
+			if len(previous) > 0 {
+				old, ok = previous[0].Lookup(p)
+			}
+			if ok && !old.OutOfScope && old.ContentID == f.ContentID {
 				f.ContentRef = old.ContentRef
 			}
 		}
 
 		if f.ContentRef == "" {
-			f.ContentRef, e = r.Objects.Put(content)
+			f.ContentRef, e = r.Objects.PutContext(ctx, content)
 			if e != nil {
 				return domain.State{}, e
 			}
 		}
 
 		state = state.Set(p, f)
+		if info.Mode().IsRegular() {
+			nextCache.Files[cacheKey(p)] = stamp(info)
+		}
 		seen[p] = true
 	}
 	for path := range state.All() {
@@ -364,6 +417,8 @@ func (r *Repository) Worktree(ctx context.Context, base domain.State, previous .
 			state = state.Delete(path)
 		}
 	}
+	nextCache.Root = state.Root()
+	r.saveFileCache(nextCache)
 	return state, nil
 }
 

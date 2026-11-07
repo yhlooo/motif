@@ -252,3 +252,28 @@ func TestConcurrentDecisionRevisionRejectsLostUpdate(t *testing.T) {
 		t.Fatal("partial stale decision", e)
 	}
 }
+
+func TestNormalOpenDoesNotWaitForActiveCaptureLease(t *testing.T) {
+	s, _ := testStore(t)
+	release, e := s.CaptureLease(context.Background())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer release()
+	done := make(chan error, 1)
+	go func() {
+		other, e := Open(s.Dir)
+		if e == nil {
+			e = other.Close()
+		}
+		done <- e
+	}()
+	select {
+	case e := <-done:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("normal open waited for shared capture lease")
+	}
+}

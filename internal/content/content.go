@@ -36,7 +36,7 @@ func (o Objects) Path(ref string) (string, error) {
 	return filepath.Join(o.Dir, "blobs", "sha256", ref[:2], ref[2:]), nil
 }
 func (o Objects) Read(ctx context.Context, ref string) ([]byte, error) {
-	release, e := o.Lease(false)
+	release, e := o.LeaseContext(ctx, false)
 	if e != nil {
 		return nil, e
 	}
@@ -76,8 +76,10 @@ func (o Objects) Read(ctx context.Context, ref string) ([]byte, error) {
 	}
 	return data, nil
 }
-func (o Objects) Put(data []byte) (string, error) {
-	release, e := o.Lease(false)
+func (o Objects) Put(data []byte) (string, error) { return o.PutContext(context.Background(), data) }
+
+func (o Objects) PutContext(ctx context.Context, data []byte) (string, error) {
+	release, e := o.LeaseContext(ctx, false)
 	if e != nil {
 		return "", e
 	}

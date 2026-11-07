@@ -27,6 +27,8 @@ type Store struct {
 	transactions    atomic.Int64
 	mu              sync.Mutex
 	nodes           map[string]domain.State
+	baselines       map[state.BaselineRef]domain.State
+	baselineEntries int
 
 	db  *gorm.DB
 	Dir string
@@ -63,19 +65,41 @@ func Open(dir string) (*Store, error) {
 	}
 	pool.SetMaxOpenConns(1)
 	s := &Store{db: db, Dir: dir, nodes: map[string]domain.State{}}
-	release, lockErr := s.lease(true)
+	// Normal hook startup is a reader. Only initialization and pending deletion
+	// recovery require the global exclusive lifecycle lease.
+	release, lockErr := s.lease(false)
 	if lockErr != nil {
 		pool.Close()
 		return nil, lockErr
 	}
-	defer release()
-	if err = s.migrate(); err != nil {
-		_ = pool.Close()
-		return nil, err
+	initialized := s.db.Migrator().HasTable(&schemaMigration{})
+	pending := int64(0)
+	if initialized {
+		err = s.migrate()
+		if err == nil {
+			err = s.db.Model(&deletionTask{}).Count(&pending).Error
+		}
 	}
-	if err = s.drainDeletes(); err != nil {
+	release()
+	if err != nil {
 		pool.Close()
 		return nil, err
+	}
+	if !initialized || pending > 0 {
+		release, lockErr = s.lease(true)
+		if lockErr != nil {
+			pool.Close()
+			return nil, lockErr
+		}
+		err = s.migrate()
+		if err == nil {
+			err = s.drainDeletes()
+		}
+		release()
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -169,9 +193,9 @@ func (s *Store) Register(ctx context.Context, common, root, gitdir string) (w do
 	})
 	return
 }
-func (s *Store) snapshot(id string) (domain.Snapshot, error) {
+func (s *Store) snapshot(ctx context.Context, id string) (domain.Snapshot, error) {
 	var row snapshotRecord
-	if e := s.db.Where("id = ?", id).Take(&row).Error; e != nil {
+	if e := s.db.WithContext(ctx).Where("id = ?", id).Take(&row).Error; e != nil {
 		return domain.Snapshot{}, e
 	}
 	s.mu.Lock()
@@ -179,16 +203,40 @@ func (s *Store) snapshot(id string) (domain.Snapshot, error) {
 	if len(s.nodes) > 100000 {
 		s.nodes = map[string]domain.State{}
 	}
-	restored, e := state.Restore(row.Root, func(id string) ([]byte, error) { return s.Blob(id) }, s.nodes)
+	restored, e := state.RestoreWithBaseline(row.Root, func(id string) ([]byte, error) { return (content.Objects{Dir: s.Dir}).Read(ctx, id) }, s.nodes, func(ref state.BaselineRef) (domain.State, error) {
+		if cached, ok := s.baselines[ref]; ok {
+			return cached, nil
+		}
+		base, e := content.LoadBaseline(ctx, ref)
+		if e != nil {
+			return domain.State{}, e
+		}
+		if s.baselineEntries+base.Len() > 100000 || len(s.baselines) >= 16 {
+			s.baselines = nil
+			s.baselineEntries = 0
+		}
+		if base.Len() <= 100000 {
+			if s.baselines == nil {
+				s.baselines = map[state.BaselineRef]domain.State{}
+			}
+			s.baselines[ref] = base
+			s.baselineEntries += base.Len()
+		}
+		return base, nil
+	})
 	return domain.Snapshot{ID: row.ID, WorktreeID: row.WorktreeID, Base: row.Base, Trigger: row.Trigger, Time: row.ObservedAt, State: restored}, e
 }
 func (s *Store) Snapshot(id string) (domain.Snapshot, error) {
-	release, e := s.lease(false)
+	return s.SnapshotContext(context.Background(), id)
+}
+
+func (s *Store) SnapshotContext(ctx context.Context, id string) (domain.Snapshot, error) {
+	release, e := s.CaptureLease(ctx)
 	if e != nil {
 		return domain.Snapshot{}, e
 	}
 	defer release()
-	return s.snapshot(id)
+	return s.snapshot(ctx, id)
 }
 func (s *Store) saveSnapshot(tx *gorm.DB, w, base, trigger string, state domain.State, prepared *PreparedStates) (domain.Snapshot, error) {
 	sn := domain.Snapshot{ID: domain.ID(), WorktreeID: w, Base: base, Trigger: trigger, Time: domain.Now(), State: state}

@@ -19,10 +19,13 @@ type File struct {
 	OID        string `json:"oid,omitempty"`
 }
 
-// State is a persistent AVL path index. A copy shares all unchanged nodes;
-// Set/Delete copy only O(log(paths)) nodes and never mutate an earlier state.
+// State is an immutable path index, optionally backed by prepared Git metadata.
+// Only overrides allocate AVL nodes; copies share the baseline and unchanged nodes.
 // The zero value is the empty state.
-type State struct{ root *node }
+type State struct {
+	root *node
+	base *baseline
+}
 type node struct {
 	path          string
 	file          File
@@ -125,10 +128,13 @@ func remove(n *node, p string) *node {
 	}
 	return balance(makeNode(successor.path, successor.file, n.left, remove(n.right, successor.path)))
 }
-func (s State) Set(p string, f File) State { return State{put(s.root, p, f)} }
-func (s State) Delete(p string) State      { return State{remove(s.root, p)} }
-func (s State) Len() int                   { return count(s.root) }
+func (s State) Set(p string, f File) State { return s.set(p, f) }
+func (s State) Delete(p string) State      { return s.delete(p) }
+func (s State) Len() int                   { return s.length() }
 func (s State) Lookup(p string) (File, bool) {
+	if s.base != nil {
+		return s.lookup(p)
+	}
 	for n := s.root; n != nil; {
 		if p == n.path {
 			return n.file, true
@@ -143,6 +149,9 @@ func (s State) Lookup(p string) (File, bool) {
 }
 func (s State) Get(p string) File { f, _ := s.Lookup(p); return f }
 func (s State) All() iter.Seq2[string, File] {
+	if s.base != nil {
+		return s.all()
+	}
 	return func(yield func(string, File) bool) {
 		var walk func(*node) bool
 		walk = func(n *node) bool { return n == nil || (walk(n.left) && yield(n.path, n.file) && walk(n.right)) }
@@ -164,12 +173,20 @@ func From(m map[string]File) State {
 		p := paths[mid]
 		return makeNode(p, m[p], build(a, mid), build(mid+1, b))
 	}
-	return State{build(0, len(paths))}
+	return State{root: build(0, len(paths))}
 }
 func Clone(s State) State { return s }
 func Equal(a, b State) bool {
-	if a.root == b.root {
+	if a.base == b.base && a.root == b.root {
 		return true
+	}
+	if sameBaseline(a, b) {
+		equal := true
+		for range changedSparse(a, b) {
+			equal = false
+			break
+		}
+		return equal
 	}
 	if a.Len() != b.Len() {
 		return false
@@ -230,8 +247,11 @@ func Apply(current, before, after State) (State, error) {
 
 // ChangedPaths avoids traversing shared subtrees when their roots agree.
 func ChangedPaths(a, b State) iter.Seq[string] {
+	if a.base != nil || b.base != nil {
+		return changedSparse(a, b)
+	}
 	return func(yield func(string) bool) {
-		if a.root == b.root {
+		if a.base == b.base && a.root == b.root {
 			return
 		}
 		// Aligned subtrees can be skipped; rotations fall back to ordered comparison.
@@ -249,9 +269,9 @@ func ChangedPaths(a, b State) iter.Seq[string] {
 				}
 				return walk(x.right, y.right)
 			}
-			as, stopA := iter.Pull2((State{x}).All())
+			as, stopA := iter.Pull2((State{root: x}).All())
 			defer stopA()
-			bs, stopB := iter.Pull2((State{y}).All())
+			bs, stopB := iter.Pull2((State{root: y}).All())
 			defer stopB()
 			ap, af, aok := as()
 			bp, bf, bok := bs()
@@ -297,10 +317,23 @@ func id(n *node) string {
 func (n *node) record() NodeRecord {
 	return NodeRecord{1, []byte(n.path), n.file, id(n.left), id(n.right)}
 }
-func (s State) Root() string { return id(s.root) }
+func (s State) Root() string {
+	if s.base != nil {
+		return digest(s.descriptor())
+	}
+	return id(s.root)
+}
 
 // Persist stops at nodes already durable; no complete snapshot serialization.
 func (s State) Persist(exists func(string) bool, write func(string, []byte) error) error {
+	if s.base != nil {
+		raw := s.descriptor()
+		key := digest(raw)
+		if exists(key) {
+			return nil
+		}
+		return write(key, raw)
+	}
 	var walk func(*node) error
 	walk = func(n *node) error {
 		if n == nil || exists(n.id) {
@@ -320,6 +353,10 @@ func (s State) Persist(exists func(string) bool, write func(string, []byte) erro
 
 // Restore uses the caller's bounded node cache to share nodes across snapshots.
 func Restore(root string, read func(string) ([]byte, error), cache map[string]State) (State, error) {
+	return RestoreWithBaseline(root, read, cache, nil)
+}
+
+func RestoreWithBaseline(root string, read func(string) ([]byte, error), cache map[string]State, load func(BaselineRef) (State, error)) (State, error) {
 	if root == "" {
 		return State{}, nil
 	}
@@ -337,19 +374,22 @@ func Restore(root string, read func(string) ([]byte, error), cache map[string]St
 	if e = json.Unmarshal(raw, &r); e != nil {
 		return State{}, e
 	}
+	if r.Version == 2 {
+		return restoreDescriptor(raw, root, cache, load)
+	}
 	if r.Version != 1 {
 		return State{}, fmt.Errorf("unsupported state node version")
 	}
-	l, e := Restore(r.Left, read, cache)
+	l, e := RestoreWithBaseline(r.Left, read, cache, load)
 	if e != nil {
 		return State{}, e
 	}
-	right, e := Restore(r.Right, read, cache)
+	right, e := RestoreWithBaseline(r.Right, read, cache, load)
 	if e != nil {
 		return State{}, e
 	}
 	n := makeNode(string(r.Path), r.File, l.root, right.root)
-	s := State{n}
+	s := State{root: n}
 	if len(cache) < 100000 {
 		cache[root] = s
 	}

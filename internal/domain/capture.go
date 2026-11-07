@@ -1,6 +1,11 @@
 package domain
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrCaptureConflict = errors.New("capture cursor changed; retry observation")
 
 // CaptureInput contains every fact needed by the state machine. No IO, database
 // transaction, or context-dependent lookup is available to the planner.
@@ -31,7 +36,7 @@ func PlanCapture(in CaptureInput) (CapturePlan, error) {
 	o, c := in.Observation, in.Cursor
 	p := CapturePlan{ExpectedVersion: c.Version, Worktree: o.Worktree, Observation: o}
 	if c.Version != o.ExpectedVersion {
-		return p, fmt.Errorf("capture cursor changed; retry observation")
+		return p, ErrCaptureConflict
 	}
 	a := in.ActiveCall
 	if o.Trigger == "PostToolUse" && (a == nil || a.Session != o.Session || a.ExternalID != o.ExternalCall) {

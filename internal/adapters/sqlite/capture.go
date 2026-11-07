@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"github.com/go-logr/logr"
+	"github.com/yhlooo/motif/internal/content"
 	"github.com/yhlooo/motif/internal/domain"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"time"
 )
 
 func call(q *gorm.DB, id string) (domain.Call, error) {
@@ -42,7 +44,7 @@ func (s *Store) PrepareCapture(ctx context.Context, o domain.Observation) (plan 
 		}
 		in.Cursor = c
 		if c.Version != o.ExpectedVersion {
-			return fmt.Errorf("capture cursor changed; retry observation")
+			return domain.ErrCaptureConflict
 		}
 		if c.ActiveCall != "" {
 			a, e := call(tx, c.ActiveCall)
@@ -74,7 +76,7 @@ func (s *Store) PrepareCapture(ctx context.Context, o domain.Observation) (plan 
 		return domain.CapturePlan{Ignored: true}, nil
 	}
 	if in.Cursor.SnapshotID != "" && !o.Reset {
-		in.Before, err = s.Snapshot(in.Cursor.SnapshotID)
+		in.Before, err = s.SnapshotContext(ctx, in.Cursor.SnapshotID)
 		if err != nil {
 			return plan, err
 		}
@@ -83,11 +85,12 @@ func (s *Store) PrepareCapture(ctx context.Context, o domain.Observation) (plan 
 }
 
 func (s *Store) Observe(ctx context.Context, o domain.Observation) error {
-	release, e := s.lease(false)
+	release, e := (content.Objects{Dir: s.Dir}).LeaseContext(ctx, false)
 	if e != nil {
 		return e
 	}
 	defer release()
+	stage := time.Now()
 	plan, e := s.PrepareCapture(ctx, o)
 	if e != nil {
 		return e
@@ -97,6 +100,8 @@ func (s *Store) Observe(ctx context.Context, o domain.Observation) error {
 			"trigger", o.Trigger, "session", o.Session, "turn", o.Turn, "tool_use_id", o.ExternalCall)
 		return nil
 	}
+	logr.FromContextOrDiscard(ctx).V(1).Info("capture plan prepared", "elapsed", time.Since(stage))
+	stage = time.Now()
 	states := []domain.State{}
 	for _, sn := range plan.Snapshots {
 		states = append(states, sn.State)
@@ -105,12 +110,16 @@ func (s *Store) Observe(ctx context.Context, o domain.Observation) error {
 	if e != nil {
 		return e
 	}
-	return s.update(ctx, func(tx *gorm.DB) error {
+	logr.FromContextOrDiscard(ctx).V(1).Info("capture objects prepared", "elapsed", time.Since(stage), "new_objects", len(prepared.local))
+	stage = time.Now()
+	e = s.update(ctx, func(tx *gorm.DB) error {
 		if e := s.publishObjects(tx, o.Worktree.ID, prepared); e != nil {
 			return e
 		}
 		return s.commitCapture(tx, plan, prepared)
 	})
+	logr.FromContextOrDiscard(ctx).V(1).Info("capture transaction finished", "elapsed", time.Since(stage))
+	return e
 }
 func (s *Store) commitCapture(tx *gorm.DB, p domain.CapturePlan, prepared *PreparedStates) error {
 	if p.Ignored {
@@ -136,7 +145,7 @@ func (s *Store) commitCapture(tx *gorm.DB, p domain.CapturePlan, prepared *Prepa
 		return e
 	}
 	if c.Version != p.ExpectedVersion {
-		return fmt.Errorf("capture cursor changed; retry observation")
+		return domain.ErrCaptureConflict
 	}
 	if o.Session != "" && o.Turn != "" {
 		id := ContentHash([]byte(w + "/" + o.Session + "/" + o.Turn))
@@ -194,8 +203,14 @@ func (s *Store) commitCapture(tx *gorm.DB, p domain.CapturePlan, prepared *Prepa
 			return e
 		}
 	}
-	if e = autoUnknown(tx, w); e != nil {
-		return e
+	segments := map[string]bool{}
+	for _, change := range p.Changes {
+		segments[change.Segment] = true
+	}
+	for segment := range segments {
+		if e = autoUnknown(tx, w, segment); e != nil {
+			return e
+		}
 	}
 	if o.Receipt != "" {
 		return tx.Create(&receiptRecord{WorktreeID: w, Key: o.Receipt, Digest: o.Digest}).Error
@@ -220,4 +235,23 @@ func (s *Store) Turn(w, session, external string) (string, error) {
 	var row turnRecord
 	err := s.db.Where("worktree_id = ? AND session = ? AND external_id = ?", w, session, external).Take(&row).Error
 	return row.ID, err
+}
+
+// HasReceipt is a fast preflight; commitCapture still checks atomically.
+func (s *Store) HasReceipt(ctx context.Context, w, key, digest string) (bool, error) {
+	if key == "" {
+		return false, nil
+	}
+	var r receiptRecord
+	e := s.db.WithContext(ctx).Where("worktree_id = ? AND key = ?", w, key).Take(&r).Error
+	if errors.Is(e, ErrNotFound) {
+		return false, nil
+	}
+	if e != nil {
+		return false, e
+	}
+	if r.Digest != digest {
+		return false, fmt.Errorf("hook receipt conflict")
+	}
+	return true, nil
 }

@@ -2,11 +2,9 @@ package sqlite
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/yhlooo/motif/internal/content"
 	"github.com/yhlooo/motif/internal/domain"
-	"github.com/yhlooo/motif/internal/domain/state"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -25,10 +23,43 @@ func (s *Store) prepareIO(ctx context.Context, w string, states []domain.State) 
 		return nil, e
 	}
 	known := map[string]bool{}
+	// Preload sparse manifest/content ownership in bounded SQL batches.
+	required := map[string]bool{}
+	for _, st := range states {
+		required[st.Root()] = true
+		for _, entry := range st.Overrides() {
+			if entry.File != nil {
+				ref := entry.File.ContentRef
+				if ref != "" && !content.IsGit(ref) {
+					required[ref] = true
+				}
+			}
+		}
+	}
+	ids := make([]string, 0, len(required))
+	for id := range required {
+		if id != "" {
+			ids = append(ids, id)
+			known[id] = false
+		}
+	}
+	for start := 0; start < len(ids); start += 200 {
+		end := min(start+200, len(ids))
+		var ownedIDs []string
+		if e := s.db.WithContext(ctx).Model(&objectReference{}).Where("repository_id = ? AND hash IN ?", worktree.RepositoryID, ids[start:end]).Pluck("hash", &ownedIDs).Error; e != nil {
+			return nil, e
+		}
+		for _, id := range ownedIDs {
+			known[id] = true
+		}
+	}
 	var ownershipErr error
 	owned := func(id string) bool {
-		if p.local[id] || known[id] {
+		if p.local[id] {
 			return true
+		}
+		if value, ok := known[id]; ok {
+			return value
 		}
 		var n int64
 		if e := s.db.WithContext(ctx).Model(&objectReference{}).Where("repository_id = ? AND hash = ?", worktree.RepositoryID, id).Count(&n).Error; e != nil {
@@ -39,26 +70,31 @@ func (s *Store) prepareIO(ctx context.Context, w string, states []domain.State) 
 		return n > 0
 	}
 	for _, snapshotState := range states {
+		if e := ctx.Err(); e != nil {
+			return nil, e
+		}
 		if p.roots[snapshotState.Root()] {
 			continue
+		}
+		// Only overlay content needs ownership; inherited Git entries are not copied.
+		for _, entry := range snapshotState.Overrides() {
+			if entry.File == nil {
+				continue
+			}
+			ref := entry.File.ContentRef
+			if ref != "" && !content.IsGit(ref) && !owned(ref) {
+				if ownershipErr != nil {
+					return nil, ownershipErr
+				}
+				if _, e := s.Blob(ref); e != nil {
+					return nil, e
+				}
+				p.local[ref] = true
+			}
 		}
 		e := snapshotState.Persist(owned, func(id string, data []byte) error {
 			if ownershipErr != nil {
 				return ownershipErr
-			}
-			var node state.NodeRecord
-			if e := json.Unmarshal(data, &node); e != nil {
-				return e
-			}
-			ref := node.File.ContentRef
-			if ref != "" && !content.IsGit(ref) && !owned(ref) {
-				if ownershipErr != nil {
-					return ownershipErr
-				}
-				if _, e := s.Blob(ref); e != nil {
-					return e
-				}
-				p.local[ref] = true
 			}
 			ref, e := s.PutBlob(data)
 			if e != nil {

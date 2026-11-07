@@ -2,16 +2,20 @@
 package capture
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/go-logr/logr"
+	"github.com/yhlooo/motif/internal/adapters/gitrepo"
 	"github.com/yhlooo/motif/internal/app/workspace"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/yhlooo/motif/internal/adapters/sqlite"
 	"github.com/yhlooo/motif/internal/domain"
@@ -33,15 +37,54 @@ type ToolHookInput struct {
 type CodexInput = ToolHookInput
 
 func Observe(ctx context.Context, r *workspace.Project, w domain.Worktree, o domain.Observation) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if e := ctx.Err(); e != nil {
+			return e
+		}
+		err = observeOnce(ctx, r, w, o)
+		if !errors.Is(err, domain.ErrCaptureConflict) && !errors.Is(err, gitrepo.ErrCaptureChanged) {
+			return err
+		}
+	}
+	return err
+}
+
+func observeOnce(ctx context.Context, r *workspace.Project, w domain.Worktree, o domain.Observation) error {
+	start := time.Now()
+	stage := start
+	logStage := func(name string) {
+		now := time.Now()
+		logr.FromContextOrDiscard(ctx).V(1).Info("capture stage", "stage", name, "elapsed", now.Sub(stage), "total", now.Sub(start))
+		stage = now
+	}
+	duplicate, e := r.Store.HasReceipt(ctx, w.ID, o.Receipt, o.Digest)
+	if e != nil || duplicate {
+		return e
+	}
+	release, e := r.Store.CaptureLease(ctx)
+	if e != nil {
+		return e
+	}
+	defer release()
+	logStage("lease")
 	c, err := r.Store.Cursor(w.ID)
 	if err != nil && !errors.Is(err, sqlite.ErrNotFound) {
 		return err
+	}
+	if o.Trigger == "PostToolUse" && c.ActiveCall == "" {
+		return nil
 	}
 	o.ExpectedVersion = c.Version
 	head, err := r.Head(ctx)
 	if err != nil {
 		return err
 	}
+	boundary, e := r.Git(ctx, "ls-files", "--stage", "-z")
+	if e != nil {
+		return e
+	}
+	logStage("cursor/head/index")
 	o.Worktree = w
 	o.Base = head
 	if o.Commit != "" {
@@ -75,19 +118,37 @@ func Observe(ctx context.Context, r *workspace.Project, w domain.Worktree, o dom
 	if err != nil {
 		return err
 	}
+	logStage("baseline")
 	var previous domain.State
 	if c.SnapshotID != "" && !o.Reset {
-		sn, e := r.Store.Snapshot(c.SnapshotID)
+		sn, e := r.Store.SnapshotContext(ctx, c.SnapshotID)
 		if e != nil {
 			return e
 		}
 		previous = sn.State
 	}
+	logStage("previous")
+	stats := r.ReadStats()
 	o.State, err = r.Worktree(ctx, o.BaseState, previous)
 	if err != nil {
 		return err
 	}
-	return r.Store.Observe(ctx, o)
+	logStage("worktree")
+	currentHead, e := r.Head(ctx)
+	if e != nil {
+		return e
+	}
+	currentIndex, e := r.Git(ctx, "ls-files", "--stage", "-z")
+	if e != nil {
+		return e
+	}
+	if currentHead != head || !bytes.Equal(boundary, currentIndex) {
+		return gitrepo.ErrCaptureChanged
+	}
+	err = r.Store.Observe(ctx, o)
+	logStage("persist")
+	logr.FromContextOrDiscard(ctx).V(1).Info("capture work", "paths", o.State.Len(), "overrides", len(o.State.Overrides()), "read_bytes", r.ReadStats().WorktreeBytes-stats.WorktreeBytes)
+	return err
 }
 func Codex(ctx context.Context, s *sqlite.Store, raw []byte) (map[string]string, error) {
 	var input CodexInput
@@ -151,7 +212,7 @@ func captureAgent(ctx context.Context, s *sqlite.Store, input ToolHookInput, raw
 	if err != nil {
 		return nil, err
 	}
-	es, err := s.Events(w.ID)
+	es, err := s.TurnEvents(w.ID, turn)
 	if err != nil {
 		return nil, err
 	}

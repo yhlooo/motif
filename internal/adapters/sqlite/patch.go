@@ -17,9 +17,15 @@ func invalid(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalidArgument, fmt.Sprintf(format, args...))
 }
 
-func events(q *gorm.DB, w string) ([]domain.Event, error) {
+func events(q *gorm.DB, w string) ([]domain.Event, error) { return eventsMatching(q, w, "") }
+
+func eventsMatching(q *gorm.DB, w, query string, args ...any) ([]domain.Event, error) {
+	eventQuery := q.Session(&gorm.Session{})
+	if query != "" {
+		eventQuery = eventQuery.Where(query, args...)
+	}
 	var rows []eventRecord
-	if err := q.Where("worktree_id = ?", w).Order("projected").Order("sequence").Find(&rows).Error; err != nil {
+	if err := eventQuery.Where("worktree_id = ?", w).Order("projected").Order("sequence").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	var associations []commitChangeRecord
@@ -214,8 +220,8 @@ func (s *Store) DeleteBatch(ctx context.Context, w, id string) error {
 		return nil
 	})
 }
-func autoUnknown(tx *gorm.DB, w string) error {
-	es, err := events(tx, w)
+func autoUnknown(tx *gorm.DB, w, segment string) error {
+	es, err := eventsMatching(tx, w, "segment = ?", segment)
 	if err != nil {
 		return err
 	}
@@ -350,4 +356,9 @@ func mirrorBatch(tx *gorm.DB, w string, b domain.Batch, source []domain.Event) e
 		i = j
 	}
 	return nil
+}
+
+// TurnEvents loads only the current turn for hook feedback.
+func (s *Store) TurnEvents(w, turn string) ([]domain.Event, error) {
+	return eventsMatching(s.db, w, "turn_id = ?", turn)
 }
